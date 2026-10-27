@@ -76,6 +76,7 @@ describe('ExecuteSignalService', () => {
       entryPrice: 420,
       orders: [{ kind: 'ENTRY', id: 'O1' }],
       error: null,
+      errorCode: null,
     });
     expect(executions.list('user1', 10)).toEqual([result]);
   });
@@ -144,6 +145,7 @@ describe('ExecuteSignalService', () => {
     await service.execute('user1', run());
     advance(5 * 60 * 1000);
     const [repeat] = await service.execute('user1', run({ text: TEXT.toLowerCase() }));
+    expect(repeat!.errorCode).toBe('duplicate');
     expect(repeat!.error).toBe(
       'Already placed on this account at 09:30 IST (maybe from another device). Send it again with "place anyway" to repeat it.',
     );
@@ -164,6 +166,7 @@ describe('ExecuteSignalService', () => {
     const first = service.execute('user1', run());
     const [second] = await service.execute('user1', run({ allowDuplicate: true }));
     expect(second!.error).toBe('This signal is already being placed on this account from another device.');
+    expect(second!.errorCode).toBe('in_flight');
     release();
     expect((await first)[0]!.error).toBeNull();
     expect(broker.placeTrade).toHaveBeenCalledTimes(1);

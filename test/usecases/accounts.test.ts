@@ -51,6 +51,7 @@ describe('AccountService', () => {
       paperMode: true,
       loggedIn: false,
       tokenIssuedAt: null,
+      login: { kind: 'approval', url: 'https://groww.in/trade-api/api-keys' },
     });
     expect(repo.find('user1', view.id)).toMatchObject({ apiKey: 'upkey1234', apiSecret: 'upsecret' });
     expect(service.list('user1')).toEqual([view]);

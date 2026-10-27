@@ -19,6 +19,7 @@ export const executionView = (e: Execution) => ({
   entryPrice: e.entryPrice,
   orders: e.orders,
   error: e.error,
+  errorCode: e.errorCode,
   success: e.error === null,
 });
 

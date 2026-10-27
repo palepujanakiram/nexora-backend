@@ -132,7 +132,14 @@ describe('HTTP API', () => {
     const created = await app.inject({ method: 'POST', url: '/v1/accounts', headers: auth, payload: zerodha });
     expect(created.statusCode).toBe(201);
     const account = created.json();
-    expect(account).toMatchObject({ label: 'Main', apiKeyMasked: 'kite••••23', paperMode: true, lots: 1, loggedIn: false });
+    expect(account).toMatchObject({
+      label: 'Main',
+      apiKeyMasked: 'kite••••23',
+      paperMode: true,
+      lots: 1,
+      loggedIn: false,
+      login: { kind: 'redirect', url: 'https://kite.zerodha.com/connect/login?v=3&api_key=kitekey123' },
+    });
     expect(JSON.stringify(account)).not.toContain('kitesecret');
 
     const listed = await app.inject({ url: '/v1/accounts', headers: auth });
@@ -195,6 +202,8 @@ describe('HTTP API', () => {
       symbol: 'SENSEX26O2973100PE',
       quantity: 20,
       orders: [{ kind: 'ENTRY', id: 'O1' }],
+      error: null,
+      errorCode: null,
     });
     expect(fetch.calls.some((c) => c.url === 'https://api.kite.trade/orders/regular')).toBe(true);
 

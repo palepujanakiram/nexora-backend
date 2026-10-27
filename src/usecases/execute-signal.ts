@@ -73,7 +73,7 @@ export class ExecuteSignalService {
       const results = await Promise.all(
         accounts.map((a) => {
           const lockKey = `${a.id}:${signalKey}`;
-          if (this.inFlight.has(lockKey)) return this.refuse(a, signal, signalKey, IN_FLIGHT);
+          if (this.inFlight.has(lockKey)) return this.result(a, signal, signalKey, { error: IN_FLIGHT, errorCode: 'in_flight' });
           this.inFlight.add(lockKey);
           locked.push(lockKey);
           return this.executeOne(a, signal, signalKey, input);
@@ -101,6 +101,7 @@ export class ExecuteSignalService {
           error:
             `Already placed on this account at ${istTime(previous.time)} IST` +
             ' (maybe from another device). Send it again with "place anyway" to repeat it.',
+          errorCode: 'duplicate',
         });
       }
     }
@@ -150,10 +151,6 @@ export class ExecuteSignalService {
     }
   }
 
-  private refuse(account: BrokerAccount, signal: TradeSignal, signalKey: string, error: string): Execution {
-    return this.result(account, signal, signalKey, { error });
-  }
-
   private result(account: BrokerAccount, signal: TradeSignal, signalKey: string, fields: Partial<Execution>): Execution {
     return {
       id: newId(),
@@ -170,6 +167,7 @@ export class ExecuteSignalService {
       entryPrice: null,
       orders: [],
       error: null,
+      errorCode: null,
       ...fields,
     };
   }

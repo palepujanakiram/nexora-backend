@@ -83,12 +83,14 @@ An account as the app sees it. The secret and the access token are never returne
   "product": "carryForward",
   "paperMode": true,
   "loggedIn": false,
-  "tokenIssuedAt": null
+  "tokenIssuedAt": null,
+  "login": { "kind": "redirect", "url": "https://api.upstox.com/v2/login/authorization/dialog?…", "codeParam": "code", "redirectUri": "https://127.0.0.1/" }
 }
 ```
 
 - `broker`: `zerodha`, `upstox` or `groww`.
 - `product`: `carryForward` (NRML; Upstox `D`) or `intraday` (MIS; Upstox `I`).
+- `login`: the same thing `GET /v1/accounts/:id/login` returns. It saves a request.
 - `loggedIn`: whether today's broker session is still valid. Sessions reset daily at 06:00 IST (Kite, Groww) or 03:30 IST (Upstox).
 
 ### `GET /v1/accounts`
@@ -201,17 +203,18 @@ The response has one result per account. A failed account doesn't stop the other
       "signalText": "…", "paper": false, "time": "2026-10-27T04:00:00.000Z",
       "symbol": "SENSEX 73100 PE 29 OCT 26", "quantity": 20, "entryPrice": 420,
       "orders": [{ "kind": "GTT entry+SL 300+TGT 540", "id": "GTT-123" }],
-      "error": null, "success": true
+      "error": null, "errorCode": null, "success": true
     }
   ]
 }
 ```
 
-An account comes back with `success: false` and an `error` when:
+An account comes back with `success: false` and an `error` when any of the following happens. For the duplicate checks, `errorCode` says which one it was, so the app can offer **Place anyway**.
 
 - The broker session expired. Log in again.
 - `LIVE_TRADING` is off for a live account.
-- The signal was already placed on it recently, or is being placed from another device right now.
+- The signal was already placed on it recently (`errorCode: "duplicate"`).
+- The signal is being placed on it from another device right now (`errorCode: "in_flight"`).
 - The broker rejected the order.
 
 Paper accounts never send orders. They return `PAPER-…` ids, and they still resolve the real contract when logged in.

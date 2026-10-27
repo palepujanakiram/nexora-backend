@@ -38,6 +38,8 @@ export interface AccountView {
   paperMode: boolean;
   loggedIn: boolean;
   tokenIssuedAt: string | null;
+  /** How to log in to the broker today (the login URL carries the API key, as brokers require). */
+  login: LoginMethod;
 }
 
 export interface AccountDeps {
@@ -152,6 +154,7 @@ export class AccountService {
       paperMode: a.paperMode,
       loggedIn: hasValidToken(a, this.deps.clock()),
       tokenIssuedAt: a.tokenIssuedAt?.toISOString() ?? null,
+      login: this.deps.brokers(a).login(),
     };
   }
 }
