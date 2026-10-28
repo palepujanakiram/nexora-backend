@@ -2,7 +2,7 @@
 # Orders must leave from one static IP, so this runs exactly one machine in
 # Mumbai with an app-scoped static egress IP (see docs/deploy-fly.md).
 
-app = "nexora-backend"
+app = "nexora-backend-jp"
 primary_region = "bom"
 
 [build]
