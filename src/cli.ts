@@ -1,8 +1,10 @@
 import { loadConfig } from './config.ts';
 import { createServices } from './container.ts';
+import { e164 } from './domain/phone.ts';
 
 const USAGE = `Usage:
   node dist/cli.js create-user <email>       (password from NEXORA_PASSWORD)
+  node dist/cli.js create-phone-user <mobile> (signs in with an SMS code)
   node dist/cli.js gen-key                   (prints a new ENCRYPTION_KEY)`;
 
 /**
@@ -10,19 +12,29 @@ const USAGE = `Usage:
  * failure. Kept free of process I/O so it can be tested.
  */
 export async function runCli(args: string[], env: Record<string, string | undefined>): Promise<string> {
-  const [command, email] = args;
+  const [command, arg] = args;
   if (command === 'gen-key') {
     const { randomBytes } = await import('node:crypto');
     return randomBytes(32).toString('base64');
   }
   if (command === 'create-user') {
-    if (!email) throw new Error(USAGE);
+    if (!arg) throw new Error(USAGE);
     const password = env['NEXORA_PASSWORD'];
     if (!password) throw new Error('Set NEXORA_PASSWORD to the new user\'s password.');
     const services = createServices(loadConfig(env));
     try {
-      const user = await services.auth.createUser(email, password);
+      const user = await services.auth.createUser(arg, password);
       return `Created user ${user.email} (${user.id}).`;
+    } finally {
+      services.db.close();
+    }
+  }
+  if (command === 'create-phone-user') {
+    if (!arg) throw new Error(USAGE);
+    const services = createServices(loadConfig(env));
+    try {
+      const user = services.auth.createPhoneUser(arg);
+      return `Created user ${e164(user.phone!)} (${user.id}).`;
     } finally {
       services.db.close();
     }

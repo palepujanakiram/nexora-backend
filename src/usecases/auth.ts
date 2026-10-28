@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 
 import { badRequest, conflict, forbidden, unauthorized } from '../domain/errors.ts';
+import { normalizeIndianMobile } from '../domain/phone.ts';
 import { hashPassword, newId, newToken, sha256, verifyPassword } from '../data/crypto.ts';
 import type { SessionRepository, User, UserRepository } from '../data/users.ts';
 
@@ -46,6 +47,13 @@ export class AuthService {
     if (this.deps.users.findByEmail(normalized)) throw conflict('A user with this email already exists.');
     const user = { id: newId(), email: normalized, phone: null, createdAt: this.deps.clock() };
     return this.deps.users.create(user, await hashPassword(password));
+  }
+
+  /** Creates a user who signs in with an OTP to [mobile], without an invite code (server CLI). */
+  createPhoneUser(mobile: string): User {
+    const phone = normalizeIndianMobile(mobile);
+    if (this.deps.users.findByPhone(phone)) throw conflict('A user with this mobile number already exists.');
+    return this.deps.users.create({ id: newId(), email: null, phone, createdAt: this.deps.clock() }, null);
   }
 
   async login(input: { email: string; password: string; device: string }): Promise<SignedIn> {
