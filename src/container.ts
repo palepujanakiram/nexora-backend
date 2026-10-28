@@ -1,16 +1,19 @@
 import { InstrumentCache, type Fetch } from './brokers/broker-api.ts';
 import { brokerFactory } from './brokers/index.ts';
+import { Msg91Otp } from './brokers/msg91.ts';
 import type { Config } from './config.ts';
 import { AccountRepository } from './data/accounts.ts';
 import { SecretBox } from './data/crypto.ts';
 import { openDb, type Db } from './data/db.ts';
 import { ExecutionRepository } from './data/executions.ts';
+import { OtpRepository } from './data/otp.ts';
 import { SessionRepository, UserRepository } from './data/users.ts';
 import { SignalParser } from './domain/signal-parser.ts';
 import type { AppDeps } from './http/app.ts';
 import { AccountService } from './usecases/accounts.ts';
 import { AuthService } from './usecases/auth.ts';
 import { ExecuteSignalService } from './usecases/execute-signal.ts';
+import { DEFAULT_OTP_LIMITS, OtpLoginService } from './usecases/otp-login.ts';
 
 export const VERSION = '1.0.0';
 
@@ -38,6 +41,15 @@ export function createServices(config: Config, runtime: Runtime = realRuntime): 
   const accountRepo = new AccountRepository(db, box);
   const executions = new ExecutionRepository(db);
   const brokers = brokerFactory({ ...runtime, cache: new InstrumentCache() });
+  const users = new UserRepository(db);
+  const auth = new AuthService({
+    users,
+    sessions: new SessionRepository(db),
+    clock: runtime.clock,
+    signupCode: config.SIGNUP_CODE,
+    sessionDays: config.SESSION_DAYS,
+  });
+  const { MSG91_AUTH_KEY: authKey, MSG91_TEMPLATE_ID: templateId } = config;
 
   return {
     db,
@@ -45,12 +57,17 @@ export function createServices(config: Config, runtime: Runtime = realRuntime): 
     executions,
     fetch: runtime.fetch,
     version: VERSION,
-    auth: new AuthService({
-      users: new UserRepository(db),
-      sessions: new SessionRepository(db),
+    auth,
+    otp: new OtpLoginService({
+      users,
+      otps: new OtpRepository(db),
+      auth,
+      // Config refuses OTP_PROVIDER=msg91 without both settings.
+      sender: authKey && templateId ? new Msg91Otp({ fetch: runtime.fetch, authKey, templateId }) : null,
       clock: runtime.clock,
       signupCode: config.SIGNUP_CODE,
-      sessionDays: config.SESSION_DAYS,
+      expiryMinutes: config.MSG91_OTP_EXPIRY_MINUTES,
+      limits: { ...DEFAULT_OTP_LIMITS, length: config.MSG91_OTP_LENGTH },
     }),
     accounts: new AccountService({ accounts: accountRepo, brokers, clock: runtime.clock }),
     signals: new ExecuteSignalService({

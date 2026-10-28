@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config.ts';
 import { createServices } from '../../src/container.ts';
 import { buildApp } from '../../src/http/app.ts';
+import { MSG91_BASE } from '../../src/brokers/msg91.ts';
 import { EGRESS_IP_URL } from '../../src/http/routes/server.ts';
 import { TEST_KEY, clock, fakeFetch, json, text, type FakeFetch } from '../helpers.ts';
 
@@ -54,6 +55,99 @@ async function signUp(app: FastifyInstance, email = 'me@example.com') {
 
 const zerodha = { broker: 'zerodha', label: 'Main', apiKey: 'kitekey123', apiSecret: 'kitesecret' };
 const SIGNAL = 'BUY SENSEX 29 OCT 73100 PUT AT 400-420 WITH SL OF 300 TGT1 540';
+
+/** Fake MSG91: any send succeeds; 123456 is the right code. */
+const msg91 = () =>
+  fakeFetch((url) => {
+    if (url.startsWith(`${MSG91_BASE}/otp/verify`)) {
+      const ok = new URL(url).searchParams.get('otp') === '123456';
+      return json(ok ? { type: 'success', message: 'OTP verified success' } : { type: 'error', message: 'OTP not match' });
+    }
+    if (url.startsWith(`${MSG91_BASE}/otp`)) return json({ type: 'success', request_id: 'r1' });
+    return json({ type: 'error', message: 'unexpected' }, 500);
+  });
+
+const MSG91_ENV = { OTP_PROVIDER: 'msg91', MSG91_AUTH_KEY: 'fake-auth-key', MSG91_TEMPLATE_ID: 'fake-template' };
+
+describe('mobile + OTP sign-in', () => {
+  it('sends a code through MSG91, verifies it and signs the device in', async () => {
+    const { app, fetch } = await setup(MSG91_ENV, msg91());
+    const sent = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/otp/start',
+      headers: { 'x-forwarded-for': '203.0.113.9' },
+      payload: { phone: '98765 43210', signupCode: 'invite' },
+    });
+    expect(sent.statusCode).toBe(200);
+    expect(sent.json()).toEqual({ sent: true, expires_in_seconds: 300 });
+    expect(fetch.calls[0]).toMatchObject({ method: 'POST', headers: { authkey: 'fake-auth-key' } });
+    expect(fetch.calls[0]!.url).toContain('template_id=fake-template&mobile=919876543210&otp_length=6&otp_expiry=5');
+
+    const wrong = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/otp/verify',
+      payload: { phone: '+919876543210', code: '000000' },
+    });
+    expect(wrong.statusCode).toBe(401);
+    expect(wrong.json()).toEqual({ error: { code: 'otp_invalid', message: 'Invalid OTP. 4 tries left.' } });
+
+    const ok = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/otp/verify',
+      payload: { countryCode: '+91', mobile: '9876543210', code: '123456', device: 'Pixel 9' },
+    });
+    expect(ok.statusCode).toBe(200);
+    const body = ok.json();
+    expect(body.user).toMatchObject({ email: null, phone: '+919876543210' });
+    expect(body.tokens).toEqual({ access_token: body.token, token_type: 'Bearer', expires_in: 30 * 86_400 });
+    expect(JSON.stringify(body)).not.toContain('fake-auth-key');
+
+    const auth = { authorization: `Bearer ${body.tokens.access_token}` };
+    const me = await app.inject({ url: '/v1/me', headers: auth });
+    expect(me.json()).toMatchObject({ email: null, phone: '+919876543210' });
+    expect((await app.inject({ url: '/v1/accounts', headers: auth })).statusCode).toBe(200);
+  });
+
+  it('validates the body, reports unregistered numbers and rate limits, and is off without MSG91', async () => {
+    const { app, fetch } = await setup(MSG91_ENV, msg91());
+    const post = (payload: object) =>
+      app.inject({ method: 'POST', url: '/v1/auth/otp/start', headers: { 'x-forwarded-for': '203.0.113.9' }, payload });
+    expect((await post({ phone: 12 })).json().error.code).toBe('bad_request');
+    expect((await post({ phone: '12345' })).json().error.message).toBe('Enter a 10-digit Indian mobile number.');
+    const unknown = await post({ phone: '9876543210' });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json().error.code).toBe('not_registered');
+    expect(fetch.calls).toEqual([]);
+
+    for (let i = 0; i < 5; i++) await post({ phone: '9876543210', signupCode: 'invite' });
+    const limited = await post({ phone: '9876543210', signupCode: 'invite' });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toEqual({
+      error: { code: 'rate_limited', message: 'Too many OTP requests. Try again later.', details: { retry_after_seconds: 900 } },
+    });
+
+    const { app: off } = await setup({}, msg91());
+    const res = await off.inject({ method: 'POST', url: '/v1/auth/otp/start', payload: { phone: '9876543210' } });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe('otp_unavailable');
+  });
+
+  it('turns on with just the MSG91 settings and uses MSG91_OTP_LENGTH / MSG91_OTP_EXPIRY_MINUTES', async () => {
+    const env = { MSG91_AUTH_KEY: 'fake-auth-key', MSG91_TEMPLATE_ID: 'fake-template', MSG91_OTP_LENGTH: '4', MSG91_OTP_EXPIRY_MINUTES: '10' };
+    const { app, fetch } = await setup(env, msg91());
+    const sent = await app.inject({ method: 'POST', url: '/v1/auth/otp/start', payload: { phone: '9876543210', signupCode: 'invite' } });
+    expect(sent.json()).toEqual({ sent: true, expires_in_seconds: 600 });
+    expect(fetch.calls[0]!.url).toContain('otp_length=4&otp_expiry=10');
+  });
+
+  it('applies the sign-in rate limit to the OTP endpoints', async () => {
+    const { app } = await setup({ ...MSG91_ENV, AUTH_RATE_LIMIT_PER_MINUTE: '2' }, msg91());
+    const verify = () => app.inject({ method: 'POST', url: '/v1/auth/otp/verify', payload: { phone: '9876543210', code: '123456' } });
+    expect((await verify()).statusCode).toBe(401);
+    expect((await verify()).statusCode).toBe(401);
+    expect((await verify()).statusCode).toBe(429);
+  });
+});
 
 describe('HTTP API', () => {
   it('reports health without signing in', async () => {

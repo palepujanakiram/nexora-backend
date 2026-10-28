@@ -2,12 +2,15 @@
 export class AppError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Extra machine-readable fields, returned as `error.details`. */
+  readonly details: Record<string, unknown> | undefined;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
     super(message);
     this.name = 'AppError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -16,6 +19,8 @@ export const unauthorized = (message = 'Sign in first.') => new AppError(401, 'u
 export const forbidden = (message: string) => new AppError(403, 'forbidden', message);
 export const notFound = (message: string) => new AppError(404, 'not_found', message);
 export const conflict = (message: string) => new AppError(409, 'conflict', message);
+export const tooManyRequests = (message: string, retryAfterSeconds: number) =>
+  new AppError(429, 'rate_limited', message, { retry_after_seconds: retryAfterSeconds });
 
 /** Free text that can't be parsed into a trade signal. */
 export class SignalParseError extends AppError {
@@ -30,5 +35,13 @@ export class BrokerApiError extends AppError {
   constructor(message: string) {
     super(502, 'broker_error', message);
     this.name = 'BrokerApiError';
+  }
+}
+
+/** The SMS provider (MSG91) failed or refused to send (`otp_send_failed`) or check (`otp_verify_failed`) a code. */
+export class OtpProviderError extends AppError {
+  constructor(code: 'otp_send_failed' | 'otp_verify_failed', message: string) {
+    super(502, code, message);
+    this.name = 'OtpProviderError';
   }
 }

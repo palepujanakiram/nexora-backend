@@ -29,6 +29,11 @@ describe('loadConfig', () => {
       DATABASE_PATH: './data/nexora.db',
       ENCRYPTION_KEY: 'k',
       SIGNUP_CODE: null,
+      OTP_PROVIDER: '',
+      MSG91_AUTH_KEY: null,
+      MSG91_TEMPLATE_ID: null,
+      MSG91_OTP_LENGTH: 6,
+      MSG91_OTP_EXPIRY_MINUTES: 5,
       LIVE_TRADING: false,
       CORS_ORIGINS: [],
       SESSION_DAYS: 30,
@@ -54,6 +59,18 @@ describe('loadConfig', () => {
   it('explains what is wrong', () => {
     expect(() => loadConfig({})).toThrow('Invalid configuration: ENCRYPTION_KEY: ENCRYPTION_KEY is required');
     expect(() => loadConfig({ ENCRYPTION_KEY: 'k', LIVE_TRADING: 'maybe' })).toThrow('LIVE_TRADING');
+  });
+
+  it('needs the MSG91 key and template when OTP_PROVIDER=msg91', () => {
+    const msg91 = { ENCRYPTION_KEY: 'k', OTP_PROVIDER: 'msg91', MSG91_TEMPLATE_ID: 'tpl' };
+    expect(() => loadConfig(msg91)).toThrow(
+      'OTP_PROVIDER: MSG91_AUTH_KEY and MSG91_TEMPLATE_ID are required when OTP_PROVIDER=msg91',
+    );
+    expect(loadConfig({ ...msg91, MSG91_AUTH_KEY: 'fake-key', MSG91_OTP_LENGTH: '4' })).toMatchObject({
+      OTP_PROVIDER: 'msg91',
+      MSG91_OTP_LENGTH: 4,
+    });
+    expect(() => loadConfig({ ENCRYPTION_KEY: 'k', OTP_PROVIDER: 'supabase' })).toThrow('OTP_PROVIDER');
   });
 });
 

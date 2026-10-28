@@ -1,6 +1,6 @@
 # nexora-backend API
 
-Every request and response is JSON. Except for `GET /health`, `POST /v1/auth/register` and `POST /v1/auth/login`, send the token from sign-in:
+Every request and response is JSON. Except for `GET /health`, `POST /v1/auth/register`, `POST /v1/auth/login` and `POST /v1/auth/otp/start` / `verify`, send the token from sign-in:
 
 ```
 Authorization: Bearer <token>
@@ -12,16 +12,24 @@ Errors always look like this, with an HTTP status to match:
 { "error": { "code": "bad_request", "message": "Enter the API key." } }
 ```
 
+Some errors add machine-readable `details`, e.g. `{ "retry_after_seconds": 540 }` on an OTP `429`.
+
 | Status | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | Missing or invalid fields. The message names the field. |
 | 401 | `unauthorized` | No token, or the session ended or expired. Sign in again. |
 | 403 | `forbidden` | Registration closed or wrong invite code. |
+| 404 | `not_registered` | OTP sign-in for a number with no login: send the invite code too (or sign-up is closed). |
+| 401 | `otp_invalid` | Wrong SMS code. The message says how many tries are left. |
+| 401 | `otp_expired` | No live code for this number (expired, already used, or never sent). Ask for a new one. |
+| 429 | `otp_attempts` | Too many wrong codes. Ask for a new one. |
 | 404 | `not_found` | No such account (or it belongs to someone else), or no such endpoint. |
 | 409 | `conflict` | Email already registered. |
 | 422 | `invalid_signal` | The signal text can't be parsed. |
-| 429 | `rate_limited` | Too many requests. Wait a minute. |
+| 429 | `rate_limited` | Too many requests, or too many SMS codes (`details.retry_after_seconds` says how long to wait). |
 | 502 | `broker_error` | The broker refused or failed. The message is the broker's. |
+| 502 | `otp_send_failed` / `otp_verify_failed` | MSG91 failed to send or check a code. |
+| 503 | `otp_unavailable` | Mobile sign-in isn't set up on this server (no `MSG91_AUTH_KEY` / `MSG91_TEMPLATE_ID`). |
 | 500 | `internal` | A bug. Details are in the server log only. |
 
 ## Health
@@ -43,7 +51,7 @@ Errors always look like this, with an HTTP status to match:
 `201`:
 
 ```json
-{ "token": "…", "user": { "id": "…", "email": "you@example.com" } }
+{ "token": "…", "user": { "id": "…", "email": "you@example.com", "phone": null } }
 ```
 
 Store the token in secure storage on the device. Sessions last `SESSION_DAYS` (30 by default).
@@ -51,6 +59,49 @@ Store the token in secure storage on the device. Sessions last `SESSION_DAYS` (3
 ### `POST /v1/auth/login`
 
 Body `{ email, password, device }`. The response is the same as for register. A wrong email or password returns `401`.
+
+### `POST /v1/auth/otp/start`
+
+Texts a code to an Indian mobile number through MSG91. The request and response match ManageMyFloor's `/auth/otp/start`, so the same app code can drive both.
+
+```json
+{ "phone": "+91 98765 43210", "signupCode": "<SIGNUP_CODE>" }
+```
+
+- The number is either `phone` or `countryCode` + `mobile` (`{ "countryCode": "+91", "mobile": "9876543210" }`). Only India (`+91`) works. `phone` may have `+91`, `91` or `0` in front, and spaces, dashes and brackets are ignored. The 10 digits must start with 6–9.
+- `signupCode`: only needed when the number has no login yet. Without it, the server answers `404 not_registered` and sends nothing, so the app can ask for the invite code and try again. When sign-up is closed (`SIGNUP_CODE` unset), only numbers that already have a login can sign in.
+
+`200`:
+
+```json
+{ "sent": true, "expires_in_seconds": 300 }
+```
+
+Limits (`429 rate_limited`, with `details.retry_after_seconds`): 5 codes per number per 15 minutes, and 20 per client IP per hour. The endpoint also shares the sign-in rate limit (`AUTH_RATE_LIMIT_PER_MINUTE`). Codes are `MSG91_OTP_LENGTH` digits (6 by default) and expire after `MSG91_OTP_EXPIRY_MINUTES` (5 by default).
+
+### `POST /v1/auth/otp/verify`
+
+```json
+{ "phone": "+919876543210", "code": "123456", "device": "Pixel 9" }
+```
+
+`countryCode` + `mobile` works here too. MSG91 checks the code. On success, the server signs the device in. If the number had no login and the code was sent with the right invite code, the user is created now, with no email or password.
+
+`200`:
+
+```json
+{
+  "token": "…",
+  "user": { "id": "…", "email": null, "phone": "+919876543210" },
+  "tokens": { "access_token": "…", "token_type": "Bearer", "expires_in": 2592000 }
+}
+```
+
+`token` and `tokens.access_token` are the same bearer token, and it works everywhere else in the API. `tokens` follows ManageMyFloor's shape. There is no refresh token: the session lasts `SESSION_DAYS`, then the user signs in again.
+
+- Each code allows 5 tries. A wrong code is `401 otp_invalid`; after the fifth, `429 otp_attempts`.
+- An expired or already used code is `401 otp_expired`. Ask for a new code.
+- Users created this way have no password, so `POST /v1/auth/password` returns `400` for them.
 
 ### `POST /v1/auth/logout`
 
@@ -63,8 +114,10 @@ Body `{ currentPassword, newPassword, device }`. Signs out every device, then re
 ### `GET /v1/me`
 
 ```json
-{ "id": "…", "email": "you@example.com", "createdAt": "2026-10-27T04:00:00.000Z" }
+{ "id": "…", "email": "you@example.com", "phone": null, "createdAt": "2026-10-27T04:00:00.000Z" }
 ```
+
+`email` is `null` for users who signed up with a mobile number; `phone` is `+91XXXXXXXXXX` or `null`.
 
 ## Accounts
 

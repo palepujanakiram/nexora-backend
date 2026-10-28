@@ -18,7 +18,7 @@ const inst = { symbol: 'SENSEX26O2973100PE', exchange: 'BFO', lotSize: 20, tickS
 
 function setup({ liveTrading = true, accounts = [account()] as BrokerAccount[] } = {}) {
   const db = openDb(':memory:');
-  new UserRepository(db).create({ id: 'user1', email: 'a@b.c', createdAt: NOW }, 'h');
+  new UserRepository(db).create({ id: 'user1', email: 'a@b.c', phone: null, createdAt: NOW }, 'h');
   const repo = new AccountRepository(db, new SecretBox(TEST_KEY));
   for (const a of accounts) repo.save(a);
   const executions = new ExecutionRepository(db);
