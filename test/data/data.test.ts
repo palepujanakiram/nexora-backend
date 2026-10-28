@@ -247,14 +247,14 @@ describe('OtpRepository', () => {
     otps.create(request());
     otps.create(request({ id: 'other', phone: '918888888888', ip: '5.6.7.8' }));
     expect(otps.latest('919876543210')).toEqual(request());
-    expect(otps.countForPhoneSince('919876543210', new Date(NOW.getTime() - 120_000))).toBe(2);
-    expect(otps.countForPhoneSince('919876543210', new Date(NOW.getTime() - 1))).toBe(1);
-    expect(otps.countForIpSince('1.2.3.4', new Date(0))).toBe(2);
+    expect(otps.sentToPhoneSince('919876543210', new Date(NOW.getTime() - 120_000))).toEqual([new Date(NOW.getTime() - 60_000), NOW]);
+    expect(otps.sentToPhoneSince('919876543210', new Date(NOW.getTime() - 1))).toEqual([NOW]);
+    expect(otps.sentFromIpSince('1.2.3.4', new Date(0))).toHaveLength(2);
     expect(otps.addAttempt('o1')).toBe(1);
     expect(otps.addAttempt('o1')).toBe(2);
     otps.markVerified('o1', NOW);
     expect(otps.latest('919876543210')).toMatchObject({ attempts: 2, verifiedAt: NOW });
     otps.deleteOlderThan(new Date(NOW.getTime() - 1));
-    expect(otps.countForPhoneSince('919876543210', new Date(0))).toBe(1);
+    expect(otps.sentToPhoneSince('919876543210', new Date(0))).toEqual([NOW]);
   });
 });

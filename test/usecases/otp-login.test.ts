@@ -44,107 +44,124 @@ function setup(options: { signupCode?: string | null; sender?: OtpSender | null 
   return { db, otp, auth, users, ...fake, advance: (ms: number) => (now = new Date(now.getTime() + ms)) };
 }
 
-const MOBILE = '98765 43210';
+const PHONE = '98765 43210';
 const IP = '203.0.113.9';
-const verify = { mobile: '+919876543210', otp: '123456', device: 'Pixel 9' };
+const verify = { phone: '+919876543210', code: '123456', device: 'Pixel 9' };
 
 describe('OtpLoginService', () => {
   it('signs up a new number with the invite code, then signs it in', async () => {
     const { otp, auth, sent, users } = setup();
-    expect(await otp.send({ mobile: MOBILE, ip: IP, signupCode: ' invite ' })).toEqual({
-      mobile: '+919876543210',
-      newUser: true,
-      expiresInSeconds: 300,
-      resendInSeconds: 30,
-    });
+    expect(await otp.start({ phone: PHONE, ip: IP, signupCode: ' invite ' })).toEqual({ sent: true, expires_in_seconds: 300 });
     expect(sent).toEqual([{ mobile: '919876543210', length: 6, expiryMinutes: 5 }]);
 
-    const { token, user } = await otp.verify(verify);
+    const { token, user, expiresAt, expiresInSeconds } = await otp.verify(verify);
     expect(user).toMatchObject({ email: null, phone: '919876543210', createdAt: NOW });
+    expect(expiresAt).toEqual(new Date(NOW.getTime() + 30 * 86_400_000));
+    expect(expiresInSeconds).toBe(30 * 86_400);
     expect(auth.authenticate(token)).toEqual(user);
     expect(users.passwordHash(user.id)).toBeNull();
     await expect(auth.changePassword(user, 'x', 'long enough pw', 'd')).rejects.toThrow('no password to change');
   });
 
+  it('accepts { countryCode, mobile } as well as { phone }, India only', async () => {
+    const { otp, users, sent } = setup({ signupCode: null });
+    users.create({ id: 'u1', email: null, phone: '919876543210', createdAt: NOW }, null);
+    await otp.start({ countryCode: '+91', mobile: '9876543210', ip: IP });
+    expect(sent[0]!.mobile).toBe('919876543210');
+    expect((await otp.verify({ countryCode: '91', mobile: '98765 43210', code: '123456', device: 'x' })).user.id).toBe('u1');
+    await expect(otp.start({ countryCode: '+1', mobile: '4155550100', ip: IP })).rejects.toMatchObject({
+      status: 400,
+      message: 'Only Indian (+91) mobile numbers are supported.',
+    });
+    await expect(otp.start({ ip: IP })).rejects.toThrow('Enter a 10-digit Indian mobile number.');
+  });
+
   it('signs in an existing number without an invite code, even after sign-up closes', async () => {
     const { otp, users } = setup({ signupCode: null });
     users.create({ id: 'u1', email: null, phone: '919876543210', createdAt: NOW }, null);
-    expect((await otp.send({ mobile: MOBILE, ip: IP })).newUser).toBe(false);
+    await otp.start({ phone: PHONE, ip: IP });
     expect((await otp.verify(verify)).user.id).toBe('u1');
   });
 
-  it('needs a valid invite code before texting a new number', async () => {
+  it('answers not_registered for a new number without a valid invite, and sends nothing', async () => {
     const { otp, sent } = setup();
-    await expect(otp.send({ mobile: MOBILE, ip: IP })).rejects.toMatchObject({ status: 403, code: 'signup_code_required' });
-    await expect(otp.send({ mobile: MOBILE, ip: IP, signupCode: '  ' })).rejects.toMatchObject({ code: 'signup_code_required' });
-    await expect(otp.send({ mobile: MOBILE, ip: IP, signupCode: 'nope' })).rejects.toMatchObject({
+    await expect(otp.start({ phone: PHONE, ip: IP })).rejects.toMatchObject({
+      status: 404,
+      code: 'not_registered',
+      message: 'This phone number is not registered. Enter the invite code to sign up.',
+    });
+    await expect(otp.start({ phone: PHONE, ip: IP, signupCode: '  ' })).rejects.toMatchObject({ code: 'not_registered' });
+    await expect(otp.start({ phone: PHONE, ip: IP, signupCode: 'nope' })).rejects.toMatchObject({
       status: 403,
       code: 'forbidden',
       message: 'Wrong invite code.',
     });
-    await expect(setup({ signupCode: null }).otp.send({ mobile: MOBILE, ip: IP, signupCode: 'invite' })).rejects.toMatchObject({
-      status: 403,
-      message: expect.stringContaining('registration is closed'),
+    await expect(setup({ signupCode: null }).otp.start({ phone: PHONE, ip: IP, signupCode: 'invite' })).rejects.toMatchObject({
+      status: 404,
+      message: 'This phone number is not registered.',
     });
     expect(sent).toEqual([]);
   });
 
-  it('does not create the user if sign-up closed between send and verify', async () => {
+  it('does not create the user if sign-up closed between start and verify', async () => {
     const db = openDb(':memory:');
     const users = new UserRepository(db);
     const otps = new OtpRepository(db);
     const auth = new AuthService({ users, sessions: new SessionRepository(db), clock: () => NOW, signupCode: null, sessionDays: 30 });
     const { sender } = fakeSender();
     const open = new OtpLoginService({ users, otps, auth, sender, clock: () => NOW, signupCode: 'invite', expiryMinutes: 5 });
-    await open.send({ mobile: MOBILE, ip: IP, signupCode: 'invite' });
+    await open.start({ phone: PHONE, ip: IP, signupCode: 'invite' });
     const closed = new OtpLoginService({ users, otps, auth, sender, clock: () => NOW, signupCode: null, expiryMinutes: 5 });
-    await expect(closed.verify(verify)).rejects.toMatchObject({ status: 403, message: expect.stringContaining('no login') });
+    await expect(closed.verify(verify)).rejects.toMatchObject({ status: 404, code: 'not_registered' });
     expect(users.findByPhone('919876543210')).toBeNull();
   });
 
-  it('does not create a user from a code sent before the number had one and was deleted', async () => {
+  it('does not create a user from a code sent while the number had one that was then deleted', async () => {
     const { otp, users, db } = setup();
     users.create({ id: 'u1', email: null, phone: '919876543210', createdAt: NOW }, null);
-    await otp.send({ mobile: MOBILE, ip: IP });
+    await otp.start({ phone: PHONE, ip: IP });
     db.prepare('DELETE FROM users').run();
-    await expect(otp.verify(verify)).rejects.toMatchObject({ status: 403 });
+    await expect(otp.verify(verify)).rejects.toMatchObject({ status: 404 });
   });
 
-  it('rate-limits sending per number (cooldown and hourly cap) and per IP', async () => {
+  it('allows 5 codes per number per 15 minutes and 20 per IP per hour, with retry_after_seconds', async () => {
     const { otp, advance, sent } = setup();
-    const send = (mobile = MOBILE, ip = IP) => otp.send({ mobile, ip, signupCode: 'invite' });
-    await send();
-    await expect(send()).rejects.toMatchObject({ status: 429, code: 'rate_limited', message: 'Wait 30 seconds before asking for another code.' });
-    advance(29_500);
-    await expect(send()).rejects.toThrow('Wait 1 seconds');
-    for (let i = 1; i < DEFAULT_OTP_LIMITS.perPhonePerHour; i++) {
-      advance(30_000);
-      await send();
+    const start = (phone = PHONE, ip = IP) => otp.start({ phone, ip, signupCode: 'invite' });
+    for (let i = 0; i < DEFAULT_OTP_LIMITS.perPhone; i++) {
+      await start();
+      advance(60_000);
     }
-    advance(30_000);
-    await expect(send()).rejects.toThrow('Too many codes sent to this number. Try again in an hour.');
-    advance(60 * 60 * 1000);
-    await send();
-    expect(sent).toHaveLength(DEFAULT_OTP_LIMITS.perPhonePerHour + 1);
+    // First code went out 5 minutes ago: 10 minutes to wait.
+    await expect(start()).rejects.toMatchObject({
+      status: 429,
+      code: 'rate_limited',
+      message: 'Too many OTP requests. Try again later.',
+      details: { retry_after_seconds: 600 },
+    });
+    advance(600_000);
+    await start();
+    expect(sent).toHaveLength(DEFAULT_OTP_LIMITS.perPhone + 1);
 
-    const { otp: other } = setup();
+    const { otp: other, advance: later } = setup();
     for (let i = 0; i < DEFAULT_OTP_LIMITS.perIpPerHour; i++) {
-      await other.send({ mobile: `98765${String(i).padStart(5, '0')}`, ip: IP, signupCode: 'invite' });
+      await other.start({ phone: `98765${String(i).padStart(5, '0')}`, ip: IP, signupCode: 'invite' });
     }
-    await expect(other.send({ mobile: '9999999999', ip: IP, signupCode: 'invite' })).rejects.toThrow(
-      'Too many codes requested from this network.',
-    );
-    await expect(other.send({ mobile: '9999999999', ip: '198.51.100.1', signupCode: 'invite' })).resolves.toBeTruthy();
+    later(59 * 60_000 + 59_500);
+    await expect(other.start({ phone: '9999999999', ip: IP, signupCode: 'invite' })).rejects.toMatchObject({
+      message: 'Too many OTP requests from this network. Try again later.',
+      details: { retry_after_seconds: 1 },
+    });
+    await expect(other.start({ phone: '9999999999', ip: '198.51.100.1', signupCode: 'invite' })).resolves.toBeTruthy();
   });
 
   it('caps wrong codes and counts down the tries left', async () => {
     const { otp, checked } = setup();
-    await otp.send({ mobile: MOBILE, ip: IP, signupCode: 'invite' });
-    const wrong = { ...verify, otp: '000000' };
-    await expect(otp.verify(wrong)).rejects.toMatchObject({ status: 401, code: 'otp_invalid', message: 'Wrong code. 4 tries left.' });
-    for (const left of [3, 2]) await expect(otp.verify(wrong)).rejects.toThrow(`Wrong code. ${left} tries left.`);
-    await expect(otp.verify(wrong)).rejects.toThrow('Wrong code. 1 try left.');
-    await expect(otp.verify(wrong)).rejects.toThrow('Wrong code. Ask for a new one.');
+    await otp.start({ phone: PHONE, ip: IP, signupCode: 'invite' });
+    const wrong = { ...verify, code: '000000' };
+    await expect(otp.verify(wrong)).rejects.toMatchObject({ status: 401, code: 'otp_invalid', message: 'Invalid OTP. 4 tries left.' });
+    for (const left of [3, 2]) await expect(otp.verify(wrong)).rejects.toThrow(`Invalid OTP. ${left} tries left.`);
+    await expect(otp.verify(wrong)).rejects.toThrow('Invalid OTP. 1 try left.');
+    await expect(otp.verify(wrong)).rejects.toThrow('Invalid OTP. Ask for a new one.');
     await expect(otp.verify(verify)).rejects.toMatchObject({ status: 429, code: 'otp_attempts' });
     expect(checked).toHaveLength(5);
   });
@@ -152,22 +169,35 @@ describe('OtpLoginService', () => {
   it('refuses expired, already used or never-sent codes and malformed input', async () => {
     const { otp, advance, checked } = setup();
     await expect(otp.verify(verify)).rejects.toMatchObject({ status: 401, code: 'otp_expired' });
-    await otp.send({ mobile: MOBILE, ip: IP, signupCode: 'invite' });
-    await expect(otp.verify({ ...verify, otp: '12345' })).rejects.toMatchObject({ status: 400, message: 'Enter the 6-digit code from the SMS.' });
-    await expect(otp.verify({ ...verify, mobile: '12345' })).rejects.toMatchObject({ status: 400 });
-    await expect(otp.verify({ ...verify, otp: ' 123456 ' })).resolves.toBeTruthy();
+    await otp.start({ phone: PHONE, ip: IP, signupCode: 'invite' });
+    await expect(otp.verify({ ...verify, code: '12345' })).rejects.toMatchObject({ status: 400, message: 'Enter the 6-digit code from the SMS.' });
+    await expect(otp.verify({ ...verify, phone: '12345' })).rejects.toMatchObject({ status: 400 });
+    await expect(otp.verify({ ...verify, code: ' 123456 ' })).resolves.toBeTruthy();
     await expect(otp.verify(verify)).rejects.toMatchObject({ code: 'otp_expired' });
 
-    advance(30_000);
-    await otp.send({ mobile: MOBILE, ip: IP });
+    await otp.start({ phone: PHONE, ip: IP });
     advance(5 * 60 * 1000);
     await expect(otp.verify(verify)).rejects.toThrow('This code has expired. Ask for a new one.');
     expect(checked).toEqual(['123456']);
   });
 
+  it('uses the configured code length', async () => {
+    const db = openDb(':memory:');
+    const users = new UserRepository(db);
+    const auth = new AuthService({ users, sessions: new SessionRepository(db), clock: () => NOW, signupCode: 'invite', sessionDays: 30 });
+    const { sender, sent } = fakeSender();
+    const otp = new OtpLoginService({
+      users, otps: new OtpRepository(db), auth, sender, clock: () => NOW, signupCode: 'invite', expiryMinutes: 10,
+      limits: { ...DEFAULT_OTP_LIMITS, length: 4 },
+    });
+    expect(await otp.start({ phone: PHONE, ip: IP, signupCode: 'invite' })).toEqual({ sent: true, expires_in_seconds: 600 });
+    expect(sent[0]).toMatchObject({ length: 4, expiryMinutes: 10 });
+    await expect(otp.verify(verify)).rejects.toThrow('Enter the 4-digit code from the SMS.');
+  });
+
   it('is off until MSG91 is configured', async () => {
     const { otp } = setup({ sender: null });
-    for (const run of [otp.send({ mobile: MOBILE, ip: IP }), otp.verify(verify)]) {
+    for (const run of [otp.start({ phone: PHONE, ip: IP }), otp.verify(verify)]) {
       await expect(run).rejects.toMatchObject({ status: 503, code: 'otp_unavailable' });
     }
   });
@@ -180,7 +210,7 @@ describe('OtpLoginService', () => {
       verify: async () => true,
     };
     const { otp } = setup({ sender: failing });
-    await expect(otp.send({ mobile: MOBILE, ip: IP, signupCode: 'invite' })).rejects.toThrow('down');
+    await expect(otp.start({ phone: PHONE, ip: IP, signupCode: 'invite' })).rejects.toThrow('down');
     await expect(otp.verify(verify)).rejects.toMatchObject({ code: 'otp_expired' });
   });
 });

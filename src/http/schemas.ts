@@ -19,15 +19,22 @@ export const LoginBody = z.object({
   device,
 });
 
-export const SendOtpBody = z.object({
-  mobile: z.string().max(30),
+/** `{ phone }` or `{ countryCode, mobile }`, like ManageMyFloor's app sends. */
+const phoneFields = {
+  phone: z.string().max(30).optional(),
+  countryCode: z.string().max(5).optional(),
+  mobile: z.string().max(30).optional(),
+};
+
+export const StartOtpBody = z.object({
+  ...phoneFields,
   /** Needed only when the number has no login yet. */
   signupCode: z.string().max(200).optional(),
 });
 
 export const VerifyOtpBody = z.object({
-  mobile: z.string().max(30),
-  otp: z.string().max(20),
+  ...phoneFields,
+  code: z.string().max(20),
   device,
 });
 

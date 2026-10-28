@@ -72,18 +72,19 @@ export class OtpRepository {
     return row ? toRequest(row) : null;
   }
 
-  countForPhoneSince(phone: string, since: Date): number {
-    const row = this.db
-      .prepare('SELECT COUNT(*) AS n FROM otp_requests WHERE phone = ? AND created_at > ?')
-      .get(phone, since.getTime()) as { n: number };
-    return row.n;
+  /** When codes went to [phone] after [since], oldest first. */
+  sentToPhoneSince(phone: string, since: Date): Date[] {
+    return this.times('SELECT created_at FROM otp_requests WHERE phone = ? AND created_at > ? ORDER BY created_at', phone, since);
   }
 
-  countForIpSince(ip: string, since: Date): number {
-    const row = this.db
-      .prepare('SELECT COUNT(*) AS n FROM otp_requests WHERE ip = ? AND created_at > ?')
-      .get(ip, since.getTime()) as { n: number };
-    return row.n;
+  /** When codes were asked for from [ip] after [since], oldest first. */
+  sentFromIpSince(ip: string, since: Date): Date[] {
+    return this.times('SELECT created_at FROM otp_requests WHERE ip = ? AND created_at > ? ORDER BY created_at', ip, since);
+  }
+
+  private times(sql: string, key: string, since: Date): Date[] {
+    const rows = this.db.prepare(sql).all(key, since.getTime()) as { created_at: number }[];
+    return rows.map((r) => new Date(r.created_at));
   }
 
   /** Counts one try at the code. Returns the new total. */

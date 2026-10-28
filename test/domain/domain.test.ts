@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { hasValidToken, maskKey } from '../../src/domain/account.ts';
 import { AppError, BrokerApiError, SignalParseError, badRequest, conflict, forbidden, notFound, unauthorized } from '../../src/domain/errors.ts';
 import { istDate, istTime, lastIstTime } from '../../src/domain/ist.ts';
-import { e164, normalizeIndianMobile } from '../../src/domain/phone.ts';
+import { e164, normalizeIndianMobile, resolveIndianMobile } from '../../src/domain/phone.ts';
 import { contractLabel, entryLabel, exchangeOf, exitSide, isBuy, normalizeSignalText } from '../../src/domain/signal.ts';
 import { DEFAULT_EXECUTION_SETTINGS, TradePricing, hasExits } from '../../src/domain/trade.ts';
 import { NOW, account, signal } from '../helpers.ts';
@@ -21,6 +21,15 @@ describe('phone', () => {
     for (const typed of ['', '12345', '5876543210', '98765432101', '+1 415 555 0100', '98765abc10', '919876543', '0091 9876543210']) {
       expect(() => normalizeIndianMobile(typed)).toThrow('Enter a 10-digit Indian mobile number.');
     }
+  });
+
+  it('reads { phone } or { countryCode, mobile }', () => {
+    expect(resolveIndianMobile({ phone: '+919876543210' })).toBe('919876543210');
+    expect(resolveIndianMobile({ countryCode: '+91', mobile: '98765 43210' })).toBe('919876543210');
+    expect(resolveIndianMobile({ countryCode: ' 91', mobile: '9876543210', phone: 'ignored' })).toBe('919876543210');
+    expect(resolveIndianMobile({ countryCode: '+91', phone: '9876543210' })).toBe('919876543210');
+    expect(() => resolveIndianMobile({ countryCode: '+44', mobile: '7700900123' })).toThrow('Only Indian (+91)');
+    expect(() => resolveIndianMobile({})).toThrow('Enter a 10-digit Indian mobile number.');
   });
 });
 

@@ -17,3 +17,16 @@ export function normalizeIndianMobile(input: string): string {
 
 /** `+91XXXXXXXXXX`, for showing a normalized number back to the user. */
 export const e164 = (mobile: string) => `+${mobile}`;
+
+/**
+ * The number from a request body that sends either `{ phone }` or
+ * `{ countryCode, mobile }` (the two shapes ManageMyFloor's app sends).
+ * Only India (+91) is supported.
+ */
+export function resolveIndianMobile(input: { phone?: string | undefined; countryCode?: string | undefined; mobile?: string | undefined }): string {
+  if (input.countryCode?.trim() && input.mobile?.trim()) {
+    if (input.countryCode.replace(/[\s+]/g, '') !== '91') throw badRequest('Only Indian (+91) mobile numbers are supported.');
+    return normalizeIndianMobile(input.mobile);
+  }
+  return normalizeIndianMobile(input.phone ?? '');
+}

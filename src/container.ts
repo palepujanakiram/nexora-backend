@@ -13,7 +13,7 @@ import type { AppDeps } from './http/app.ts';
 import { AccountService } from './usecases/accounts.ts';
 import { AuthService } from './usecases/auth.ts';
 import { ExecuteSignalService } from './usecases/execute-signal.ts';
-import { OtpLoginService } from './usecases/otp-login.ts';
+import { DEFAULT_OTP_LIMITS, OtpLoginService } from './usecases/otp-login.ts';
 
 export const VERSION = '1.0.0';
 
@@ -62,10 +62,12 @@ export function createServices(config: Config, runtime: Runtime = realRuntime): 
       users,
       otps: new OtpRepository(db),
       auth,
+      // Config refuses OTP_PROVIDER=msg91 without both settings.
       sender: authKey && templateId ? new Msg91Otp({ fetch: runtime.fetch, authKey, templateId }) : null,
       clock: runtime.clock,
       signupCode: config.SIGNUP_CODE,
-      expiryMinutes: config.OTP_EXPIRY_MINUTES,
+      expiryMinutes: config.MSG91_OTP_EXPIRY_MINUTES,
+      limits: { ...DEFAULT_OTP_LIMITS, length: config.MSG91_OTP_LENGTH },
     }),
     accounts: new AccountService({ accounts: accountRepo, brokers, clock: runtime.clock }),
     signals: new ExecuteSignalService({

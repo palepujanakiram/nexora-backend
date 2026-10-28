@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 
 import type { SignedIn } from '../../usecases/auth.ts';
 import { bearerToken, userOf, type AppDeps } from '../app.ts';
-import { ChangePasswordBody, LoginBody, RegisterBody, SendOtpBody, VerifyOtpBody, parse } from '../schemas.ts';
+import { ChangePasswordBody, LoginBody, RegisterBody, StartOtpBody, VerifyOtpBody, parse } from '../schemas.ts';
 
 const signedIn = ({ token, user }: SignedIn) => ({
   token,
@@ -24,12 +24,17 @@ export const authRoutes =
       return signedIn(await auth.login(parse(LoginBody, request.body)));
     });
 
-    app.post('/auth/otp/send', { config: limit }, async (request) => {
-      return otp.send({ ...parse(SendOtpBody, request.body), ip: request.ip });
+    app.post('/auth/otp/start', { config: limit }, async (request) => {
+      return otp.start({ ...parse(StartOtpBody, request.body), ip: request.ip });
     });
 
+    // `{ token, user }` like the other sign-ins, plus ManageMyFloor's `tokens` shape.
     app.post('/auth/otp/verify', { config: limit }, async (request) => {
-      return signedIn(await otp.verify(parse(VerifyOtpBody, request.body)));
+      const session = await otp.verify(parse(VerifyOtpBody, request.body));
+      return {
+        ...signedIn(session),
+        tokens: { access_token: session.token, token_type: 'Bearer', expires_in: session.expiresInSeconds },
+      };
     });
   };
 

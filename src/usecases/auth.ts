@@ -18,6 +18,8 @@ export interface AuthDeps {
 export interface SignedIn {
   token: string;
   user: User;
+  /** When the session ends unless the user signs out sooner. */
+  expiresAt: Date;
 }
 
 /** Sign-up, sign-in and bearer-token sessions for app devices. */
@@ -90,13 +92,9 @@ export class AuthService {
     const now = this.deps.clock();
     this.deps.sessions.deleteExpired(now);
     const token = newToken();
-    this.deps.sessions.create(sha256(token), {
-      userId: user.id,
-      device: device.slice(0, 100),
-      createdAt: now,
-      expiresAt: new Date(now.getTime() + this.deps.sessionDays * 24 * 60 * 60 * 1000),
-    });
-    return { token, user };
+    const expiresAt = new Date(now.getTime() + this.deps.sessionDays * 24 * 60 * 60 * 1000);
+    this.deps.sessions.create(sha256(token), { userId: user.id, device: device.slice(0, 100), createdAt: now, expiresAt });
+    return { token, user, expiresAt };
   }
 }
 
