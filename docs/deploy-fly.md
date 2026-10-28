@@ -64,6 +64,13 @@ fly ips list
 
 Note the egress IPv4 address (Fly's docs: [Static egress IPs](https://fly.io/docs/networking/egress-ips/)). An app-scoped egress IP stays with the app when machines are replaced.
 
+Once the app has an egress IP, `fly deploy` no longer gives it public addresses for incoming traffic, so `<your-app>.fly.dev` won't resolve. Add them yourself (the shared IPv4 is free):
+
+```bash
+fly ips allocate-v4 --shared
+fly ips allocate-v6
+```
+
 ## 6. Deploy
 
 ```bash
