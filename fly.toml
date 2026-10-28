@@ -1,38 +1,37 @@
-# Fly.io config. Change `app` to a name of your own before `fly launch`.
-# Orders must leave from one static IP, so this runs exactly one machine in
-# Mumbai with an app-scoped static egress IP (see docs/deploy-fly.md).
+# fly.toml app configuration file generated for nexora-backend-icz7mg on 2026-10-28T17:46:18Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "nexora-backend"
-primary_region = "bom"
+app = 'nexora-backend-icz7mg'
+primary_region = 'ams'
 
 [build]
 
 [env]
-  PORT = "8080"
-  DATABASE_PATH = "/data/nexora.db"
-  # Flip to "true" only after paper trading works end to end.
-  LIVE_TRADING = "false"
-  DUPLICATE_WINDOW_MINUTES = "15"
+  DATABASE_PATH = '/data/nexora.db'
+  DUPLICATE_WINDOW_MINUTES = '15'
+  LIVE_TRADING = 'false'
+  PORT = '8080'
 
 [[mounts]]
-  source = "nexora_data"
-  destination = "/data"
+  source = 'nexora_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  # Stay up: a signal shouldn't wait for a cold start.
-  auto_stop_machines = "off"
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
   [[http_service.checks]]
-    grace_period = "10s"
-    interval = "30s"
-    method = "GET"
-    path = "/health"
-    timeout = "5s"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
