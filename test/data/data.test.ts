@@ -5,8 +5,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { AccountRepository } from '../../src/data/accounts.ts';
 import { SecretBox, hashPassword, newId, newToken, sha256, verifyPassword } from '../../src/data/crypto.ts';
-import { migrate, openDb } from '../../src/data/db.ts';
+import { DatabaseSync } from 'node:sqlite';
+
+import { MIGRATIONS, migrate, openDb } from '../../src/data/db.ts';
 import { ExecutionRepository, type Execution } from '../../src/data/executions.ts';
+import { OtpRepository, type OtpRequest } from '../../src/data/otp.ts';
 import { SessionRepository, UserRepository } from '../../src/data/users.ts';
 import { NOW, TEST_KEY, account } from '../helpers.ts';
 
@@ -17,7 +20,7 @@ afterEach(() => {
 
 function memoryDb() {
   const db = openDb(':memory:');
-  new UserRepository(db).create({ id: 'user1', email: 'a@b.c', createdAt: NOW }, 'hash');
+  new UserRepository(db).create({ id: 'user1', email: 'a@b.c', phone: null, createdAt: NOW }, 'hash');
   return db;
 }
 
@@ -64,34 +67,78 @@ describe('openDb and migrate', () => {
     dirs.push(dir);
     const path = join(dir, 'nested', 'n.db');
     const db = openDb(path);
-    new UserRepository(db).create({ id: 'u', email: 'x@y.z', createdAt: NOW }, 'h');
+    new UserRepository(db).create({ id: 'u', email: 'x@y.z', phone: null, createdAt: NOW }, 'h');
     db.close();
     const again = openDb(path);
     expect(new UserRepository(again).findById('u')?.email).toBe('x@y.z');
-    expect(again.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 });
+    expect(again.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 });
     again.close();
   });
 
   it('rolls back a failing migration', () => {
     const db = openDb(':memory:');
-    expect(() => migrate(db, ['SELECT 1', 'CREATE TABLE extra (id TEXT); NOT SQL'])).toThrow();
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 });
+    expect(() => migrate(db, ['SELECT 1', 'SELECT 1', 'CREATE TABLE extra (id TEXT); NOT SQL'])).toThrow();
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'extra'").get()).toBeUndefined();
+    expect(db.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
+  });
+
+  it('rolls back a migration that breaks a foreign key', () => {
+    const db = openDb(':memory:');
+    const orphan = "INSERT INTO sessions VALUES ('h', 'ghost', 'd', 0, 0)";
+    expect(() => migrate(db, ['SELECT 1', 'SELECT 1', orphan])).toThrow('Migration 3 leaves rows pointing at missing parents.');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 0 });
+  });
+
+  it('upgrades a version 1 database to phone sign-in without losing sessions or accounts', () => {
+    const db = new DatabaseSync(':memory:');
+    migrate(db, MIGRATIONS.slice(0, 1));
+    db.exec(`
+      INSERT INTO users VALUES ('u', 'me@example.com', 'hash', 1);
+      INSERT INTO sessions VALUES ('h', 'u', 'd', 1, 2);
+      INSERT INTO accounts VALUES ('a', 'u', 'zerodha', 'Main', 'k', 's', '', NULL, NULL, 1, 1, 'carryForward', 1, 1);
+    `);
+    db.exec('PRAGMA foreign_keys = ON');
+    migrate(db);
+    expect(db.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
+    const users = new UserRepository(db);
+    expect(users.findByEmail('me@example.com')).toEqual({
+      user: { id: 'u', email: 'me@example.com', phone: null, createdAt: new Date(1) },
+      passwordHash: 'hash',
+    });
+    expect(new SessionRepository(db).find('h')?.userId).toBe('u');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM accounts').get()).toEqual({ n: 1 });
+    // The rebuilt users table still cascades.
+    db.prepare('DELETE FROM users WHERE id = ?').run('u');
+    expect(new SessionRepository(db).find('h')).toBeNull();
   });
 });
 
 describe('UserRepository and SessionRepository', () => {
   it('stores users with case-insensitive email lookup', () => {
     const users = new UserRepository(openDb(':memory:'));
-    users.create({ id: 'u1', email: 'me@example.com', createdAt: NOW }, 'hash1');
+    users.create({ id: 'u1', email: 'me@example.com', phone: null, createdAt: NOW }, 'hash1');
     expect(users.findByEmail('ME@example.com')).toEqual({
-      user: { id: 'u1', email: 'me@example.com', createdAt: NOW },
+      user: { id: 'u1', email: 'me@example.com', phone: null, createdAt: NOW },
       passwordHash: 'hash1',
     });
     users.setPassword('u1', 'hash2');
     expect(users.findByEmail('me@example.com')?.passwordHash).toBe('hash2');
     expect(users.findByEmail('nobody@example.com')).toBeNull();
     expect(users.findById('nope')).toBeNull();
+    expect(users.passwordHash('u1')).toBe('hash2');
+    expect(users.passwordHash('nope')).toBeNull();
+  });
+
+  it('stores phone-only users without a password and refuses users with neither', () => {
+    const users = new UserRepository(openDb(':memory:'));
+    const user = { id: 'p1', email: null, phone: '919876543210', createdAt: NOW };
+    users.create(user, null);
+    expect(users.findByPhone('919876543210')).toEqual(user);
+    expect(users.findByPhone('919999999999')).toBeNull();
+    expect(users.passwordHash('p1')).toBeNull();
+    expect(() => users.create({ ...user, id: 'p2' }, null)).toThrow(/UNIQUE/);
+    expect(() => users.create({ id: 'p3', email: null, phone: null, createdAt: NOW }, null)).toThrow(/CHECK/);
   });
 
   it('stores, finds and removes sessions', () => {
@@ -177,5 +224,37 @@ describe('ExecutionRepository', () => {
     expect(repo.findRecentSuccess('acc1', 'k1', new Date(NOW.getTime() - 1))?.id).toBe('e1');
     expect(repo.findRecentSuccess('acc1', 'k1', new Date(NOW.getTime() + 1))).toBeNull();
     expect(repo.findRecentSuccess('acc1', 'other', new Date(0))).toBeNull();
+  });
+});
+
+describe('OtpRepository', () => {
+  const request = (overrides: Partial<OtpRequest> = {}): OtpRequest => ({
+    id: 'o1',
+    phone: '919876543210',
+    ip: '1.2.3.4',
+    createdAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 300_000),
+    attempts: 0,
+    verifiedAt: null,
+    allowSignup: true,
+    ...overrides,
+  });
+
+  it('finds the latest code, counts by number and IP, and tracks attempts', () => {
+    const otps = new OtpRepository(openDb(':memory:'));
+    expect(otps.latest('919876543210')).toBeNull();
+    otps.create(request({ id: 'old', createdAt: new Date(NOW.getTime() - 60_000), allowSignup: false }));
+    otps.create(request());
+    otps.create(request({ id: 'other', phone: '918888888888', ip: '5.6.7.8' }));
+    expect(otps.latest('919876543210')).toEqual(request());
+    expect(otps.countForPhoneSince('919876543210', new Date(NOW.getTime() - 120_000))).toBe(2);
+    expect(otps.countForPhoneSince('919876543210', new Date(NOW.getTime() - 1))).toBe(1);
+    expect(otps.countForIpSince('1.2.3.4', new Date(0))).toBe(2);
+    expect(otps.addAttempt('o1')).toBe(1);
+    expect(otps.addAttempt('o1')).toBe(2);
+    otps.markVerified('o1', NOW);
+    expect(otps.latest('919876543210')).toMatchObject({ attempts: 2, verifiedAt: NOW });
+    otps.deleteOlderThan(new Date(NOW.getTime() - 1));
+    expect(otps.countForPhoneSince('919876543210', new Date(0))).toBe(1);
   });
 });

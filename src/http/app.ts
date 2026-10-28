@@ -10,6 +10,7 @@ import { AppError, unauthorized } from '../domain/errors.ts';
 import type { AccountService } from '../usecases/accounts.ts';
 import type { AuthService } from '../usecases/auth.ts';
 import type { ExecuteSignalService } from '../usecases/execute-signal.ts';
+import type { OtpLoginService } from '../usecases/otp-login.ts';
 import { accountRoutes } from './routes/accounts.ts';
 import { activityRoutes } from './routes/activity.ts';
 import { authRoutes, meRoutes } from './routes/auth.ts';
@@ -19,6 +20,7 @@ import { signalRoutes } from './routes/signals.ts';
 export interface AppDeps {
   config: Config;
   auth: AuthService;
+  otp: OtpLoginService;
   accounts: AccountService;
   signals: ExecuteSignalService;
   executions: ExecutionRepository;

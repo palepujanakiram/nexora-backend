@@ -19,6 +19,18 @@ export const LoginBody = z.object({
   device,
 });
 
+export const SendOtpBody = z.object({
+  mobile: z.string().max(30),
+  /** Needed only when the number has no login yet. */
+  signupCode: z.string().max(200).optional(),
+});
+
+export const VerifyOtpBody = z.object({
+  mobile: z.string().max(30),
+  otp: z.string().max(20),
+  device,
+});
+
 export const ChangePasswordBody = z.object({
   currentPassword: z.string().max(200),
   newPassword: z.string().max(200),

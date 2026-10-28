@@ -6,6 +6,11 @@ const flag = (fallback: boolean) =>
     .default(fallback ? 'true' : 'false')
     .transform((v) => v === 'true' || v === '1' || v === 'yes');
 
+const optionalText = z
+  .string()
+  .optional()
+  .transform((v) => (v?.trim() ? v.trim() : null));
+
 const ConfigSchema = z.object({
   PORT: z.coerce.number().int().min(0).max(65535).default(8080),
   HOST: z.string().default('0.0.0.0'),
@@ -13,10 +18,13 @@ const ConfigSchema = z.object({
   /** 32 random bytes, base64. Encrypts broker secrets and tokens at rest. */
   ENCRYPTION_KEY: z.string({ error: 'ENCRYPTION_KEY is required (openssl rand -base64 32).' }).min(1),
   /** Invite code for /v1/auth/register. Unset closes registration. */
-  SIGNUP_CODE: z
-    .string()
-    .optional()
-    .transform((v) => (v?.trim() ? v.trim() : null)),
+  SIGNUP_CODE: optionalText,
+  /** MSG91 auth key for mobile + OTP sign-in. Unset turns OTP sign-in off. */
+  MSG91_AUTH_KEY: optionalText,
+  /** MSG91 OTP template id (DLT-approved, with the ##OTP## placeholder). */
+  MSG91_TEMPLATE_ID: optionalText,
+  /** How long an SMS code stays valid. */
+  OTP_EXPIRY_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
   /** Must be true for live (non-paper) accounts to send real orders. */
   LIVE_TRADING: flag(false),
   /** Web origins allowed to call the API, comma-separated. Mobile apps don't need this. */

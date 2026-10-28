@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config.ts';
 import { createServices } from '../../src/container.ts';
 import { buildApp } from '../../src/http/app.ts';
+import { MSG91_BASE } from '../../src/brokers/msg91.ts';
 import { EGRESS_IP_URL } from '../../src/http/routes/server.ts';
 import { TEST_KEY, clock, fakeFetch, json, text, type FakeFetch } from '../helpers.ts';
 
@@ -54,6 +55,81 @@ async function signUp(app: FastifyInstance, email = 'me@example.com') {
 
 const zerodha = { broker: 'zerodha', label: 'Main', apiKey: 'kitekey123', apiSecret: 'kitesecret' };
 const SIGNAL = 'BUY SENSEX 29 OCT 73100 PUT AT 400-420 WITH SL OF 300 TGT1 540';
+
+/** Fake MSG91: any send succeeds; 123456 is the right code. */
+const msg91 = () =>
+  fakeFetch((url) => {
+    if (url.startsWith(`${MSG91_BASE}/otp/verify`)) {
+      const ok = new URL(url).searchParams.get('otp') === '123456';
+      return json(ok ? { type: 'success', message: 'OTP verified success' } : { type: 'error', message: 'OTP not match' });
+    }
+    if (url.startsWith(`${MSG91_BASE}/otp`)) return json({ type: 'success', request_id: 'r1' });
+    return json({ type: 'error', message: 'unexpected' }, 500);
+  });
+
+const MSG91_ENV = { MSG91_AUTH_KEY: 'AUTHKEY123', MSG91_TEMPLATE_ID: 'TPL1' };
+
+describe('mobile + OTP sign-in', () => {
+  it('sends a code through MSG91, verifies it and signs the device in', async () => {
+    const { app, fetch } = await setup(MSG91_ENV, msg91());
+    const sent = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/otp/send',
+      headers: { 'x-forwarded-for': '203.0.113.9' },
+      payload: { mobile: '98765 43210', signupCode: 'invite' },
+    });
+    expect(sent.statusCode).toBe(200);
+    expect(sent.json()).toEqual({ mobile: '+919876543210', newUser: true, expiresInSeconds: 300, resendInSeconds: 30 });
+    expect(fetch.calls[0]).toMatchObject({ method: 'POST', headers: { authkey: 'AUTHKEY123' } });
+    expect(fetch.calls[0]!.url).toContain('template_id=TPL1&mobile=919876543210');
+
+    const wrong = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/otp/verify',
+      payload: { mobile: '+919876543210', otp: '000000' },
+    });
+    expect(wrong.statusCode).toBe(401);
+    expect(wrong.json()).toEqual({ error: { code: 'otp_invalid', message: 'Wrong code. 4 tries left.' } });
+
+    const ok = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/otp/verify',
+      payload: { mobile: '9876543210', otp: '123456', device: 'Pixel 9' },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().user).toMatchObject({ email: null, phone: '+919876543210' });
+    expect(JSON.stringify(ok.json())).not.toContain('AUTHKEY123');
+
+    const auth = { authorization: `Bearer ${ok.json().token}` };
+    const me = await app.inject({ url: '/v1/me', headers: auth });
+    expect(me.json()).toMatchObject({ email: null, phone: '+919876543210' });
+    expect((await app.inject({ url: '/v1/accounts', headers: auth })).statusCode).toBe(200);
+  });
+
+  it('validates the body, asks for the invite code, and is off without MSG91 settings', async () => {
+    const { app, fetch } = await setup(MSG91_ENV, msg91());
+    const post = (url: string, payload: unknown) => app.inject({ method: 'POST', url, payload: payload as object });
+    expect((await post('/v1/auth/otp/send', {})).json().error.code).toBe('bad_request');
+    expect((await post('/v1/auth/otp/send', { mobile: '12345' })).json().error.message).toBe('Enter a 10-digit Indian mobile number.');
+    const needsCode = await post('/v1/auth/otp/send', { mobile: '9876543210' });
+    expect(needsCode.statusCode).toBe(403);
+    expect(needsCode.json().error.code).toBe('signup_code_required');
+    expect(fetch.calls).toEqual([]);
+
+    const { app: off } = await setup({}, msg91());
+    const res = await off.inject({ method: 'POST', url: '/v1/auth/otp/send', payload: { mobile: '9876543210' } });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe('otp_unavailable');
+  });
+
+  it('applies the sign-in rate limit to the OTP endpoints', async () => {
+    const { app } = await setup({ ...MSG91_ENV, AUTH_RATE_LIMIT_PER_MINUTE: '2' }, msg91());
+    const verify = () => app.inject({ method: 'POST', url: '/v1/auth/otp/verify', payload: { mobile: '9876543210', otp: '123456' } });
+    expect((await verify()).statusCode).toBe(401);
+    expect((await verify()).statusCode).toBe(401);
+    expect((await verify()).statusCode).toBe(429);
+  });
+});
 
 describe('HTTP API', () => {
   it('reports health without signing in', async () => {

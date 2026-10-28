@@ -1,19 +1,23 @@
 import type { Db } from './db.ts';
 
+/** Signs in with an email and password, a mobile number and OTP, or both. */
 export interface User {
   id: string;
-  email: string;
+  email: string | null;
+  /** `91XXXXXXXXXX`. */
+  phone: string | null;
   createdAt: Date;
 }
 
 interface UserRow {
   id: string;
-  email: string;
-  password_hash: string;
+  email: string | null;
+  phone: string | null;
+  password_hash: string | null;
   created_at: number;
 }
 
-const toUser = (r: UserRow): User => ({ id: r.id, email: r.email, createdAt: new Date(r.created_at) });
+const toUser = (r: UserRow): User => ({ id: r.id, email: r.email, phone: r.phone, createdAt: new Date(r.created_at) });
 
 /** People who sign in to the backend. Each owns their broker accounts and activity. */
 export class UserRepository {
@@ -23,22 +27,37 @@ export class UserRepository {
     this.db = db;
   }
 
-  create(user: User, passwordHash: string): User {
+  /** [passwordHash] is null for users who sign in only with a mobile number and OTP. */
+  create(user: User, passwordHash: string | null): User {
     this.db
-      .prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
-      .run(user.id, user.email, passwordHash, user.createdAt.getTime());
+      .prepare('INSERT INTO users (id, email, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(user.id, user.email, user.phone, passwordHash, user.createdAt.getTime());
     return user;
   }
 
   /** The user and their password hash, matched case-insensitively. */
-  findByEmail(email: string): { user: User; passwordHash: string } | null {
+  findByEmail(email: string): { user: User; passwordHash: string | null } | null {
     const row = this.db.prepare('SELECT * FROM users WHERE email = ?').get(email) as UserRow | undefined;
     return row ? { user: toUser(row), passwordHash: row.password_hash } : null;
+  }
+
+  /** The user with mobile number [phone] (`91XXXXXXXXXX`). */
+  findByPhone(phone: string): User | null {
+    const row = this.db.prepare('SELECT * FROM users WHERE phone = ?').get(phone) as UserRow | undefined;
+    return row ? toUser(row) : null;
   }
 
   findById(id: string): User | null {
     const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
     return row ? toUser(row) : null;
+  }
+
+  /** The user's password hash, or null when they have no password (OTP sign-in only). */
+  passwordHash(id: string): string | null {
+    const row = this.db.prepare('SELECT password_hash FROM users WHERE id = ?').get(id) as
+      | { password_hash: string | null }
+      | undefined;
+    return row?.password_hash ?? null;
   }
 
   setPassword(id: string, passwordHash: string): void {

@@ -40,6 +40,13 @@ fly secrets set SIGNUP_CODE="pick-a-long-invite-code"
 
 - **Save a copy of `ENCRYPTION_KEY` somewhere safe**, for example a password manager. You can't read it back from Fly. If it's lost, every stored broker secret becomes unreadable, and accounts have to be added again.
 - `SIGNUP_CODE` is what you and your family type in the app to create logins. You can remove it later (`fly secrets unset SIGNUP_CODE`) to close sign-up.
+- For **mobile number + OTP sign-in**, add your [MSG91](https://msg91.com) auth key and OTP template id (from the MSG91 panel; the template must be DLT-approved and contain `##OTP##`). Without them, OTP sign-in is off and email sign-in still works.
+
+  ```bash
+  fly secrets set MSG91_AUTH_KEY="your-msg91-auth-key" MSG91_TEMPLATE_ID="your-otp-template-id"
+  ```
+
+  MSG91 auth keys can be locked to IP addresses. If yours is, add the static egress IP from step 5 to it.
 - If you'll use the Flutter **web** build, also allow its address:
 
   ```bash

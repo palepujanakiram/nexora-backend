@@ -16,6 +16,7 @@ export const unauthorized = (message = 'Sign in first.') => new AppError(401, 'u
 export const forbidden = (message: string) => new AppError(403, 'forbidden', message);
 export const notFound = (message: string) => new AppError(404, 'not_found', message);
 export const conflict = (message: string) => new AppError(409, 'conflict', message);
+export const tooManyRequests = (message: string) => new AppError(429, 'rate_limited', message);
 
 /** Free text that can't be parsed into a trade signal. */
 export class SignalParseError extends AppError {
@@ -30,5 +31,13 @@ export class BrokerApiError extends AppError {
   constructor(message: string) {
     super(502, 'broker_error', message);
     this.name = 'BrokerApiError';
+  }
+}
+
+/** The SMS provider (MSG91) failed or refused to send or check a code. */
+export class OtpProviderError extends AppError {
+  constructor(message: string) {
+    super(502, 'otp_provider_error', message);
+    this.name = 'OtpProviderError';
   }
 }

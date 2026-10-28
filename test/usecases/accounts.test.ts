@@ -10,7 +10,7 @@ import { NOW, TEST_KEY } from '../helpers.ts';
 
 function setup() {
   const db = openDb(':memory:');
-  new UserRepository(db).create({ id: 'user1', email: 'a@b.c', createdAt: NOW }, 'h');
+  new UserRepository(db).create({ id: 'user1', email: 'a@b.c', phone: null, createdAt: NOW }, 'h');
   const repo = new AccountRepository(db, new SecretBox(TEST_KEY));
   const broker: BrokerApi = {
     login: vi.fn(() => ({ kind: 'approval' as const, url: 'https://groww.in/trade-api/api-keys' })),
