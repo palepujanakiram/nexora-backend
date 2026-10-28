@@ -18,6 +18,8 @@ export interface AuthDeps {
 export interface SignedIn {
   token: string;
   user: User;
+  /** When the session ends unless the user signs out sooner. */
+  expiresAt: Date;
 }
 
 /** Sign-up, sign-in and bearer-token sessions for app devices. */
@@ -42,7 +44,7 @@ export class AuthService {
     if (!/^[^@\s]+@[^@\s]+$/.test(normalized)) throw badRequest('Enter a valid email address.');
     checkPassword(password);
     if (this.deps.users.findByEmail(normalized)) throw conflict('A user with this email already exists.');
-    const user = { id: newId(), email: normalized, createdAt: this.deps.clock() };
+    const user = { id: newId(), email: normalized, phone: null, createdAt: this.deps.clock() };
     return this.deps.users.create(user, await hashPassword(password));
   }
 
@@ -50,7 +52,7 @@ export class AuthService {
     const found = this.deps.users.findByEmail(input.email.trim().toLowerCase());
     // Hash even for unknown emails so response times don't reveal which emails exist.
     const ok = await verifyPassword(input.password, found?.passwordHash ?? DUMMY_HASH);
-    if (!found || !ok) throw unauthorized('Wrong email or password.');
+    if (!found?.passwordHash || !ok) throw unauthorized('Wrong email or password.');
     return this.startSession(found.user, input.device);
   }
 
@@ -74,8 +76,9 @@ export class AuthService {
 
   /** Changes the password and signs out every device, then signs this one back in. */
   async changePassword(user: User, current: string, next: string, device: string): Promise<SignedIn> {
-    const found = this.deps.users.findByEmail(user.email);
-    if (!found || !(await verifyPassword(current, found.passwordHash))) {
+    const hash = this.deps.users.passwordHash(user.id);
+    if (!hash) throw badRequest('You sign in with your mobile number, so there is no password to change.');
+    if (!(await verifyPassword(current, hash))) {
       throw unauthorized('Current password is wrong.');
     }
     checkPassword(next);
@@ -84,17 +87,14 @@ export class AuthService {
     return this.startSession(user, device);
   }
 
-  private startSession(user: User, device: string): SignedIn {
+  /** Signs [user] in on [device] with a new bearer token. */
+  startSession(user: User, device: string): SignedIn {
     const now = this.deps.clock();
     this.deps.sessions.deleteExpired(now);
     const token = newToken();
-    this.deps.sessions.create(sha256(token), {
-      userId: user.id,
-      device: device.slice(0, 100),
-      createdAt: now,
-      expiresAt: new Date(now.getTime() + this.deps.sessionDays * 24 * 60 * 60 * 1000),
-    });
-    return { token, user };
+    const expiresAt = new Date(now.getTime() + this.deps.sessionDays * 24 * 60 * 60 * 1000);
+    this.deps.sessions.create(sha256(token), { userId: user.id, device: device.slice(0, 100), createdAt: now, expiresAt });
+    return { token, user, expiresAt };
   }
 }
 
@@ -104,7 +104,8 @@ function checkPassword(password: string) {
   }
 }
 
-function sameSecret(given: string, expected: string): boolean {
+/** Compares an invite code in constant time. */
+export function sameSecret(given: string, expected: string): boolean {
   const a = Buffer.from(sha256(given));
   const b = Buffer.from(sha256(expected));
   return timingSafeEqual(a, b);

@@ -56,6 +56,16 @@ describe('AuthService', () => {
     );
   });
 
+  it('refuses a password login for a user who has no password', async () => {
+    const db = openDb(':memory:');
+    const users = new UserRepository(db);
+    users.create({ id: 'u1', email: 'otp@example.com', phone: '919876543210', createdAt: NOW }, null);
+    const auth = new AuthService({ users, sessions: new SessionRepository(db), clock: () => NOW, signupCode: null, sessionDays: 30 });
+    await expect(auth.login({ email: 'otp@example.com', password: 'long enough pw', device: 'x' })).rejects.toThrow(
+      'Wrong email or password.',
+    );
+  });
+
   it('ends sessions on logout, expiry or when the user is gone', async () => {
     const { auth, advance } = setup();
     const { token } = await auth.register(register);

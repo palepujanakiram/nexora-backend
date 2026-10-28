@@ -20,8 +20,8 @@ Under SEBI's rules for retail API trading, brokers accept API orders only from a
 - **Safety switches.**
   - New accounts start in paper mode.
   - Live orders need `LIVE_TRADING=true` on the server.
-  - Sign-up needs an invite code.
-  - Sign-in attempts are rate-limited.
+  - Sign-up needs an invite code, whether by email or mobile number.
+  - Sign-in attempts are rate-limited, and SMS codes are limited per number and per IP, with 5 tries per code.
 
 ## Quick start (local)
 
@@ -29,7 +29,7 @@ Needs Node.js 24 or later.
 
 ```bash
 npm install
-cp .env.example .env              # then set ENCRYPTION_KEY (openssl rand -base64 32) and SIGNUP_CODE
+cp .env.example .env              # then set ENCRYPTION_KEY (openssl rand -base64 32), SIGNUP_CODE and MSG91_AUTH_KEY (or empty OTP_PROVIDER)
 node --env-file=.env src/server.ts
 curl localhost:8080/health
 ```
@@ -47,7 +47,7 @@ See [docs/api.md](docs/api.md). Every endpoint is JSON over HTTPS. Apart from he
 | Area | Endpoints |
 |---|---|
 | Health | `GET /health` |
-| Sign-in | `POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/logout`, `POST /v1/auth/password`, `GET /v1/me` |
+| Sign-in | `POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/otp/start`, `POST /v1/auth/otp/verify`, `POST /v1/auth/logout`, `POST /v1/auth/password`, `GET /v1/me` |
 | Accounts | `GET/POST /v1/accounts`, `GET/PATCH/DELETE /v1/accounts/:id` |
 | Broker login | `GET /v1/accounts/:id/login`, `POST/DELETE /v1/accounts/:id/session` |
 | Signals | `POST /v1/signals/parse`, `POST /v1/signals/execute` |
@@ -59,7 +59,12 @@ See [docs/api.md](docs/api.md). Every endpoint is JSON over HTTPS. Apart from he
 | Variable | Default | Meaning |
 |---|---|---|
 | `ENCRYPTION_KEY` | required | 32 random bytes, base64. Encrypts broker secrets and tokens. **Back it up**: without it, stored secrets can't be read. |
-| `SIGNUP_CODE` | unset | Invite code for `POST /v1/auth/register`. Unset closes sign-up; create users with the CLI instead. |
+| `SIGNUP_CODE` | unset | Invite code for `POST /v1/auth/register`, and for a new number's first `POST /v1/auth/otp/start`. Unset closes sign-up; create users with the CLI instead. |
+| `OTP_PROVIDER` | unset | `msg91` turns on mobile + OTP sign-in, and then the server refuses to start without the two MSG91 settings below. Setting both also turns it on. |
+| `MSG91_AUTH_KEY` | unset | [MSG91](https://msg91.com) auth key. Secret: sent only to MSG91, never logged or returned. |
+| `MSG91_TEMPLATE_ID` | unset | MSG91 OTP template id (DLT-approved, with the `##OTP##` placeholder). |
+| `MSG91_OTP_LENGTH` | `6` | Digits in an SMS code (4–9). |
+| `MSG91_OTP_EXPIRY_MINUTES` | `5` | How long an SMS code stays valid (1–30). |
 | `LIVE_TRADING` | `false` | Must be `true` for live (non-paper) accounts to send real orders. |
 | `DATABASE_PATH` | `./data/nexora.db` | SQLite file. On Fly: `/data/nexora.db` on a volume. |
 | `PORT` / `HOST` | `8080` / `0.0.0.0` | Where to listen. |
@@ -84,9 +89,9 @@ Clean Architecture, mirroring the app:
 ```
 src/
   domain/      pure rules: signal parser, pricing, token expiry, IST dates, errors
-  brokers/     Kite, Upstox and Groww clients (fetch injected; no global state)
+  brokers/     Kite, Upstox and Groww clients, and the MSG91 OTP client (fetch injected; no global state)
   data/        SQLite (node:sqlite), repositories, encryption and password hashing
-  usecases/    auth, accounts + broker login, signal execution with the duplicate guard
+  usecases/    auth (email + password, mobile + OTP), accounts + broker login, signal execution with the duplicate guard
   http/        Fastify app, routes, request schemas (zod)
   container.ts wires everything; server.ts and cli.ts are the entry points
 test/          mirrors src/; no test touches the network or a real broker
