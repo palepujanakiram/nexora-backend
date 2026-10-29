@@ -107,6 +107,14 @@ describe('runCli', () => {
     await expect(runCli(['create-user', 'me@example.com'], env)).rejects.toThrow('already exists');
   });
 
+  it('creates mobile users and refuses duplicates', async () => {
+    const env = { ENCRYPTION_KEY: TEST_KEY, DATABASE_PATH: tempDb() };
+    expect(await runCli(['create-phone-user', '98765 43210'], env)).toMatch(/^Created user \+919876543210 \(/);
+    await expect(runCli(['create-phone-user', '+91-9876543210'], env)).rejects.toThrow('already exists');
+    await expect(runCli(['create-phone-user', '12345'], env)).rejects.toThrow('Enter a 10-digit Indian mobile number.');
+    await expect(runCli(['create-phone-user'], {})).rejects.toThrow('Usage:');
+  });
+
   it('prints a fresh encryption key', async () => {
     expect(Buffer.from(await runCli(['gen-key'], {}), 'base64')).toHaveLength(32);
   });

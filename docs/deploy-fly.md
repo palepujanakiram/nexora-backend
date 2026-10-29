@@ -64,6 +64,13 @@ fly ips list
 
 Note the egress IPv4 address (Fly's docs: [Static egress IPs](https://fly.io/docs/networking/egress-ips/)). An app-scoped egress IP stays with the app when machines are replaced.
 
+Once the app has an egress IP, `fly deploy` no longer gives it public addresses for incoming traffic, so `<your-app>.fly.dev` won't resolve. Add them yourself (the shared IPv4 is free):
+
+```bash
+fly ips allocate-v4 --shared
+fly ips allocate-v6
+```
+
 ## 6. Deploy
 
 ```bash
@@ -132,6 +139,7 @@ Brokers may let you change the registered IP only about once a week, so finish s
 |---|---|
 | Logs | `fly logs` |
 | Create a user without the invite code | `fly ssh console -C "sh -c 'NEXORA_PASSWORD=\"long password\" node dist/cli.js create-user you@example.com'"` |
+| Let a mobile number sign in with an SMS code, without the invite code | `fly ssh console -C "node dist/cli.js create-phone-user 9876543210"` |
 | Back up the database | `fly ssh sftp get /data/nexora.db ./nexora-backup.db` (keep it with the `ENCRYPTION_KEY` backup; one is useless without the other) |
 | Stop all live orders immediately | `fly secrets set LIVE_TRADING=false` |
 | Update | Merge or push to `main` (CI deploys it), or `git pull && fly deploy` by hand |

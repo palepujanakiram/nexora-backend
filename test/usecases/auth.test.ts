@@ -36,6 +36,16 @@ describe('AuthService', () => {
     await expect(auth.register(register)).rejects.toMatchObject({ status: 409 });
   });
 
+  it('creates mobile users without an invite code, once per number', () => {
+    const { auth } = setup(null);
+    const user = auth.createPhoneUser('098765 43210');
+    expect(user).toMatchObject({ email: null, phone: '919876543210', createdAt: NOW });
+    expect(() => auth.createPhoneUser('+91 98765 43210')).toThrow(
+      expect.objectContaining({ status: 409, message: 'A user with this mobile number already exists.' }),
+    );
+    expect(() => auth.createPhoneUser('5876543210')).toThrow('Enter a 10-digit Indian mobile number.');
+  });
+
   it('checks email and password rules', async () => {
     const { auth } = setup();
     await expect(auth.createUser('not-an-email', 'long enough pw')).rejects.toThrow('Enter a valid email address.');
