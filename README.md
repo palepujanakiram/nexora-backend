@@ -38,7 +38,7 @@ Node runs the TypeScript directly. `npm run build && npm start` runs the compile
 
 ## Deploy
 
-See [docs/deploy-fly.md](docs/deploy-fly.md). It covers Fly.io in the Mumbai region with a static egress IP, a volume for the database, and secrets. It takes about 15 minutes and costs a few dollars a month.
+See [docs/deploy-fly.md](docs/deploy-fly.md). It covers Fly.io in the Singapore region with a static egress IP, a volume for the database, and secrets. It takes about 15 minutes and costs a few dollars a month.
 
 ## API
 

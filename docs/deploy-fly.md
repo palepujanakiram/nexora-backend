@@ -1,6 +1,6 @@
 # Deploy nexora-backend on Fly.io
 
-This guide puts the server in Fly's **Mumbai (`bom`)** region with a **static outgoing IP** that you register with your brokers. The database lives on a persistent volume, and the keys are stored as Fly secrets.
+This guide puts the server in Fly's **Singapore (`sin`)** region, the closest to Indian brokers now that Fly has no Indian region, with a **static outgoing IP** that you register with your brokers. The database lives on a persistent volume, and the keys are stored as Fly secrets.
 
 **Time:** about 15 minutes. **Cost:** roughly US $5–7 a month. That covers one always-on shared-CPU machine with 512 MB, a 1 GB volume and one static egress IPv4 (about $3.60/month). Check [fly.io/docs/about/pricing](https://fly.io/docs/about/pricing/) for current prices.
 
@@ -20,7 +20,7 @@ On other platforms, see [fly.io/docs/flyctl/install](https://fly.io/docs/flyctl/
 Pick a unique name and put it in `fly.toml` (`app = "…"`). Then, from this folder:
 
 ```bash
-fly launch --no-deploy --copy-config --region bom
+fly launch --no-deploy --copy-config --region sin
 ```
 
 If it asks to tweak settings, say no. It should keep the existing `fly.toml`.
@@ -28,7 +28,7 @@ If it asks to tweak settings, say no. It should keep the existing `fly.toml`.
 ## 3. Create the volume for the database
 
 ```bash
-fly volumes create nexora_data --region bom --size 1
+fly volumes create nexora_data --region sin --size 1
 ```
 
 ## 4. Set the secrets
@@ -58,7 +58,7 @@ fly secrets set SIGNUP_CODE="pick-a-long-invite-code"
 This IP is what brokers will see every order coming from:
 
 ```bash
-fly ips allocate-egress --region bom
+fly ips allocate-egress --region sin
 fly ips list
 ```
 
