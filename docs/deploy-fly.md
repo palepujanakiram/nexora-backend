@@ -83,6 +83,16 @@ Make sure exactly one machine is running:
 fly scale count 1
 ```
 
+### Deploy automatically from GitHub
+
+The CI workflow deploys every push to `main` once the tests pass. Give it a deploy token for the app:
+
+```bash
+fly tokens create deploy -a <your-app> | gh secret set FLY_API_TOKEN
+```
+
+Without that secret, the deploy job fails and nothing else changes.
+
 ## 7. Check the IP brokers will see
 
 Sign up first: in the app, or with the API (see [api.md](api.md)). Then:
@@ -124,7 +134,7 @@ Brokers may let you change the registered IP only about once a week, so finish s
 | Create a user without the invite code | `fly ssh console -C "sh -c 'NEXORA_PASSWORD=\"long password\" node dist/cli.js create-user you@example.com'"` |
 | Back up the database | `fly ssh sftp get /data/nexora.db ./nexora-backup.db` (keep it with the `ENCRYPTION_KEY` backup; one is useless without the other) |
 | Stop all live orders immediately | `fly secrets set LIVE_TRADING=false` |
-| Update | `git pull && fly deploy` |
+| Update | Merge or push to `main` (CI deploys it), or `git pull && fly deploy` by hand |
 
 Fly also takes daily snapshots of the volume, kept for 5 days by default (`fly volumes snapshots list nexora_data`).
 
