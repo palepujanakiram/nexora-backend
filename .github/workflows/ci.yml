@@ -19,3 +19,21 @@ jobs:
       - run: npm run build
       # Fails below 95% line coverage (vitest.config.ts thresholds).
       - run: npm run coverage
+
+  # Every push to main that passes the tests goes live on Fly (fly.toml names
+  # the app). Needs the FLY_API_TOKEN repository secret: a deploy token from
+  # `fly tokens create deploy -a nexora-backend-jp`.
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # One deploy at a time; a newer push waits rather than cancelling a rollout.
+    concurrency:
+      group: fly-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

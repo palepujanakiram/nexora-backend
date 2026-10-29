@@ -1,6 +1,6 @@
 # Deploy nexora-backend on Fly.io
 
-This guide puts the server in Fly's **Singapore (`sin`)** region, the closest to India now that Fly has no Mumbai region, with a **static outgoing IP** that you register with your brokers. The database lives on a persistent volume, and the keys are stored as Fly secrets.
+This guide puts the server in Fly's **Singapore (`sin`)** region, the closest to Indian brokers now that Fly has no Indian region, with a **static outgoing IP** that you register with your brokers. The database lives on a persistent volume, and the keys are stored as Fly secrets.
 
 **Time:** about 15 minutes. **Cost:** roughly US $5–7 a month. That covers one always-on shared-CPU machine with 512 MB, a 1 GB volume and one static egress IPv4 (about $3.60/month). Check [fly.io/docs/about/pricing](https://fly.io/docs/about/pricing/) for current prices.
 
@@ -90,6 +90,16 @@ Make sure exactly one machine is running:
 fly scale count 1
 ```
 
+### Deploy automatically from GitHub
+
+The CI workflow deploys every push to `main` once the tests pass. Give it a deploy token for the app:
+
+```bash
+fly tokens create deploy -a <your-app> | gh secret set FLY_API_TOKEN
+```
+
+Without that secret, the deploy job fails and nothing else changes.
+
 ## 7. Check the IP brokers will see
 
 Sign up first: in the app, or with the API (see [api.md](api.md)). Then:
@@ -132,7 +142,7 @@ Brokers may let you change the registered IP only about once a week, so finish s
 | Let a mobile number sign in with an SMS code, without the invite code | `fly ssh console -C "node dist/cli.js create-phone-user 9876543210"` |
 | Back up the database | `fly ssh sftp get /data/nexora.db ./nexora-backup.db` (keep it with the `ENCRYPTION_KEY` backup; one is useless without the other) |
 | Stop all live orders immediately | `fly secrets set LIVE_TRADING=false` |
-| Update | `git pull && fly deploy` |
+| Update | Merge or push to `main` (CI deploys it), or `git pull && fly deploy` by hand |
 
 Fly also takes daily snapshots of the volume, kept for 5 days by default (`fly volumes snapshots list nexora_data`).
 

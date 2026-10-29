@@ -1,6 +1,8 @@
-# Fly.io config. Change `app` to a name of your own before `fly launch`.
+# Fly.io config for the live app (nexora-backend-jp). For your own deployment,
+# change `app` to a name of your own before `fly launch`.
 # Orders must leave from one static IP, so this runs exactly one machine in
-# Singapore (Fly has no Mumbai region) with an app-scoped static egress IP (see docs/deploy-fly.md).
+# Singapore (Fly has no Indian region) with an app-scoped static egress IP
+# (see docs/deploy-fly.md).
 
 app = "nexora-backend-jp"
 primary_region = "sin"
