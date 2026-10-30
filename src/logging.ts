@@ -60,8 +60,8 @@ const TRACEPARENT = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/;
 /** Continues the caller's trace when it sent a valid `traceparent`, else starts one. Always a new span. */
 export function traceFrom(header: string | string[] | undefined): TraceContext {
   const value = Array.isArray(header) ? header[0] : header;
-  const m = value ? TRACEPARENT.exec(value) : null;
-  const traceId = m && !/^0+$/.test(m[1]!) ? m[1]! : randomBytes(16).toString('hex');
+  const [, caller] = (value ? TRACEPARENT.exec(value) : null) ?? [];
+  const traceId = caller && !/^0+$/.test(caller) ? caller : randomBytes(16).toString('hex');
   return { traceId, spanId: randomBytes(8).toString('hex') };
 }
 

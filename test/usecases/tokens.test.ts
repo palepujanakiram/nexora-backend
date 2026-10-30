@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { TokenSigner } from '../../src/usecases/tokens.ts';
 import { JWT_PRIVATE_KEY, testClock } from '../app.ts';
-import { NOW } from '../helpers.ts';
+import { NOW, defined, parseJson } from '../helpers.ts';
 
 const claims = { sub: 'usr_1', aud: 'cl_1', sid: 'ses_1' };
 const b64url = (v: string | Buffer) => Buffer.from(v).toString('base64url');
@@ -23,7 +23,7 @@ describe('TokenSigner', () => {
     expect(expiresAt).toEqual(new Date(NOW.getTime() + 900_000));
     const iat = NOW.getTime() / 1000;
     expect(s.verify(token)).toEqual({ iss: 'nexora', ...claims, iat, exp: iat + 900 });
-    const header = JSON.parse(Buffer.from(token.split('.')[0]!, 'base64url').toString());
+    const header = parseJson(Buffer.from(defined(token.split('.')[0]), 'base64url').toString());
     expect(header).toEqual({ alg: 'EdDSA', typ: 'JWT', kid: 'k1' });
   });
 
@@ -46,7 +46,7 @@ describe('TokenSigner', () => {
     const forged = b64url(JSON.stringify({ ...JSON.parse(Buffer.from(p, 'base64url').toString()), sub: 'usr_admin' }));
     expect(() => s.verify(`${h}.${forged}.${sig}`)).toThrow('Invalid access token.');
     const flipped = Buffer.from(sig, 'base64url');
-    flipped[0] = flipped[0]! ^ 0xff;
+    flipped[0] = defined(flipped[0]) ^ 0xff;
     expect(() => s.verify(`${h}.${p}.${b64url(flipped)}`)).toThrow('Invalid access token.');
   });
 
@@ -72,7 +72,8 @@ describe('TokenSigner', () => {
     const other = new TokenSigner({ privateKeyPem: pem, kid: 'k1', issuer: 'nexora', previous: [], clock: testClock() });
     const head = `${b64url(JSON.stringify({ alg: 'EdDSA', kid: 'k1' }))}.${b64url(JSON.stringify({ iss: 'nexora', ...claims, exp: 'later' }))}`;
     const token = `${head}.${b64url(sign(null, Buffer.from(head), key.privateKey))}`;
-    expect(() => other.verify(token)).toThrow('Your access token has expired. Refresh it.');
+    // The claims don't match the schema (exp isn't a number), so the token is refused as invalid outright.
+    expect(() => other.verify(token)).toThrow('Invalid access token.');
     expect(() => s.verify(token)).toThrow('Invalid access token.');
   });
 

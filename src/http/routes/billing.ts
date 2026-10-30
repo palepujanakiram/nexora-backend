@@ -18,9 +18,10 @@ export const billingRoutes =
 export const razorpayWebhookRoutes =
   ({ billing }: Services): FastifyPluginAsync =>
   async (app) => {
-    app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => done(null, body));
+    app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => { done(null, body); });
     app.post('/webhooks/razorpay', async (request) => {
       const header = (name: string) => request.headers[name]?.toString();
-      return billing.webhook(String(request.body ?? ''), header('x-razorpay-signature'), header('x-razorpay-event-id'));
+      const raw = typeof request.body === 'string' ? request.body : '';
+      return billing.webhook(raw, header('x-razorpay-signature'), header('x-razorpay-event-id'));
     });
   };

@@ -8,7 +8,7 @@ import type { StreamEvent } from '../../src/usecases/events.ts';
 import type { PlaceInput } from '../../src/usecases/orders.ts';
 import { harness } from '../app.ts';
 import { FakeKite, FakeUpstox, brokerWorld } from '../fakes.ts';
-import { NOW } from '../helpers.ts';
+import { NOW, defined } from '../helpers.ts';
 
 const INSTRUMENT = 'NFO:CE:NIFTY:2026-10-29:2450000';
 
@@ -37,7 +37,7 @@ async function world(env: Record<string, string> = {}) {
   const paper = (await s.brokerAccounts.link(user.id, { broker: 'zerodha', label: 'Paper', mode: 'paper', credentials: {} })).account.id;
 
   let n = 0;
-  const place = (accountIds: string[], over: Partial<PlaceInput['intent']> = {}) =>
+  const place = async (accountIds: string[], over: Partial<PlaceInput['intent']> = {}) =>
     s.orders.place(user.id, {
       clientId: 'cl_test',
       idempotencyKey: `key-${++n}`,
@@ -57,7 +57,7 @@ async function world(env: Record<string, string> = {}) {
   return { ...h, s, kite, upstox, user, events, kiteA, kiteB, up, paper, place, repo: new OrderRepository(s.db) };
 }
 
-const by = <T extends { accountId: string }>(legs: T[], id: string) => legs.find((l) => l.accountId === id)!;
+const by = <T extends { accountId: string }>(legs: T[], id: string) => defined(legs.find((l) => l.accountId === id));
 
 describe('fan-out place', () => {
   it('places one order per account and reports every leg on its own', async () => {
@@ -82,16 +82,16 @@ describe('fan-out place', () => {
   it('sends our client reference as the broker tag and keeps the raw exchange without credentials', async () => {
     const w = await world();
     const result = await w.place([w.kiteA]);
-    const leg = result.legs[0]!;
-    const stored = (await w.repo.leg(leg.legId))!;
-    expect([...w.kite.orders.values()][0]!.tag).toBe(stored.clientRef);
+    const leg = defined(result.legs[0]);
+    const stored = defined(await w.repo.leg(leg.legId));
+    expect(defined([...w.kite.orders.values()][0]).tag).toBe(stored.clientRef);
     const events = await w.repo.events(leg.legId);
     expect(events.map((e) => `${e.action}:${e.fromStatus}->${e.toStatus}`)).toEqual([
       'create:null->PENDING_SUBMIT',
       'place:PENDING_SUBMIT->SUBMITTED',
       'reconcile:SUBMITTED->OPEN',
     ]);
-    expect(events[1]!.rawRequest).toMatchObject({ method: 'POST', url: 'https://api.kite.trade/orders/regular', body: { tag: stored.clientRef, price: '420.00' } });
+    expect(defined(events[1]).rawRequest).toMatchObject({ method: 'POST', url: 'https://api.kite.trade/orders/regular', body: { tag: stored.clientRef, price: '420.00' } });
     const audit = JSON.stringify(events);
     expect(audit).not.toContain('secretA');
     expect(audit).not.toContain('kiteA:AT');
@@ -145,8 +145,8 @@ describe('fan-out place', () => {
     const r = await w.place([w.kiteA]);
     expect(r.legs[0]).toMatchObject({ status: 'REJECTED', error: { code: 'DRY_RUN' } });
     expect(w.kite.orders.size).toBe(0);
-    const events = await w.repo.events(r.legs[0]!.legId);
-    expect(events.at(-1)!.rawRequest).toMatchObject({ url: 'https://api.kite.trade/orders/regular', body: { quantity: '150' } });
+    const events = await w.repo.events(defined(r.legs[0]).legId);
+    expect(defined(events.at(-1)).rawRequest).toMatchObject({ url: 'https://api.kite.trade/orders/regular', body: { quantity: '150' } });
   });
 
   it('marks the account for re-linking when its session has expired', async () => {
@@ -159,7 +159,7 @@ describe('fan-out place', () => {
     });
     expect(r.legs[0]).toMatchObject({ status: 'REJECTED', error: { code: 'AUTH_EXPIRED' } });
     const account = await new BrokerAccountRepository(w.s.db).find(w.kiteA);
-    expect(account!.tokenState).toBe('needs_user_action');
+    expect(defined(account).tokenState).toBe('needs_user_action');
     expect(w.events).toContainEqual(expect.objectContaining({ type: 'relink_needed', accountId: w.kiteA }));
   });
 
@@ -221,7 +221,7 @@ describe('cancel', () => {
   it('says so when the leg filled before the cancel arrived', async () => {
     const w = await world();
     const placed = await w.place([w.kiteA]);
-    w.kite.fillOrder(by(placed.legs, w.kiteA).brokerOrderId!, 419.95);
+    w.kite.fillOrder(defined(by(placed.legs, w.kiteA).brokerOrderId), 419.95);
     const r = await w.s.orders.cancel(w.user.id, placed.parentOrderId, null);
     expect(r.legs[0]).toMatchObject({ status: 'FILLED', outcome: 'not_cancellable', avgPrice: '419.95' });
   });
@@ -230,7 +230,7 @@ describe('cancel', () => {
     const w = await world();
     const placed = await w.place([w.kiteA]);
     await w.s.risk.setKillSwitch(true, null);
-    expect((await w.s.orders.cancel(w.user.id, placed.parentOrderId, null)).legs[0]!.outcome).toBe('cancelled');
+    expect(defined((await w.s.orders.cancel(w.user.id, placed.parentOrderId, null)).legs[0]).outcome).toBe('cancelled');
     await expect(w.s.orders.cancel(w.user.id, placed.parentOrderId, [w.up])).rejects.toThrow('no leg on account');
     await expect(w.s.orders.cancel('usr_other', placed.parentOrderId, null)).rejects.toThrow('Order not found');
   });
@@ -272,7 +272,7 @@ describe('modify', () => {
     expect(by(r.legs, w.kiteA)).toMatchObject({ outcome: 'not_modifiable', reason: 'The order is filled.' });
     expect(by(r.legs, w.kiteB)).toMatchObject({ outcome: 'not_modifiable', reason: 'SL orders need a trigger price.' });
     const lot = await w.s.orders.modify(w.user.id, placed.parentOrderId, { idempotencyKey: 'm', accountIds: [w.kiteB], quantity: 100 });
-    expect(lot.legs[0]!.reason).toContain('lot size');
+    expect(defined(lot.legs[0]).reason).toContain('lot size');
   });
 
   it('stops exit-only users adding quantity, but lets them reduce it', async () => {
@@ -285,7 +285,7 @@ describe('modify', () => {
     const placed = await w.place([w.kiteA], { quantity: 150 });
     await w.s.db.query(`UPDATE subscriptions SET status = 'expired'`);
     const more = await w.s.orders.modify(w.user.id, placed.parentOrderId, { idempotencyKey: 'm', accountIds: null, quantity: 225 });
-    expect(more.legs[0]!.reason).toContain('lapsed');
+    expect(defined(more.legs[0]).reason).toContain('lapsed');
     const less = await w.s.orders.modify(w.user.id, placed.parentOrderId, { idempotencyKey: 'm2', accountIds: null, quantity: 75 });
     expect(less.legs[0]).toMatchObject({ outcome: 'modified', quantity: 75 });
   });
@@ -313,7 +313,7 @@ describe('exit', () => {
       [150, 'MARKET'],
       [75, 'MARKET'],
     ]);
-    const exitOrder = await w.s.orders.get(w.user.id, r.exitOrderId!);
+    const exitOrder = await w.s.orders.get(w.user.id, defined(r.exitOrderId));
     expect(exitOrder).toMatchObject({ kind: 'EXIT', exitOf: placed.parentOrderId, side: 'SELL', quantity: 225 });
   });
 
@@ -324,7 +324,7 @@ describe('exit', () => {
       w.s.orders.exit(w.user.id, placed.parentOrderId, 'e1', 'cl', null),
       w.s.orders.exit(w.user.id, placed.parentOrderId, 'e2', 'cl', null),
     ]);
-    const outcomes = [first.legs[0]!.outcome, second.legs[0]!.outcome].sort();
+    const outcomes = [defined(first.legs[0]).outcome, defined(second.legs[0]).outcome].sort();
     expect(outcomes).toEqual(['exit_placed', 'nothing_to_exit']);
     const positions = await w.s.positions.live(w.user.id);
     expect(positions.find((p) => p.accountId === w.paper)).toMatchObject({ positions: [expect.objectContaining({ netQty: 0 })] });
@@ -360,7 +360,7 @@ describe('exit', () => {
 
     w.kite.heldOverride = {};
     const done = await w.s.orders.exit(w.user.id, placed.parentOrderId, 'e2', 'cl', null);
-    await expect(w.s.orders.exit(w.user.id, done.exitOrderId!, 'e3', 'cl', null)).rejects.toThrow('Only entry orders');
+    await expect(w.s.orders.exit(w.user.id, defined(done.exitOrderId), 'e3', 'cl', null)).rejects.toThrow('Only entry orders');
   });
 
   it('is blocked by the kill switch', async () => {
@@ -376,7 +376,7 @@ describe('reconciliation', () => {
     const w = await world();
     w.upstox.down = true;
     const placed = await w.place([w.up]);
-    const leg = (await w.repo.leg(placed.legs[0]!.legId))!;
+    const leg = defined(await w.repo.leg(defined(placed.legs[0]).legId));
     // The order did reach Upstox after all.
     w.upstox.book.push({ order_id: 'UP77', status: 'complete', quantity: 150, filled_quantity: 150, average_price: 420.1, price: 420, tag: leg.clientRef, order_type: 'LIMIT' });
     w.clock.advance(60_000);
@@ -401,7 +401,7 @@ describe('reconciliation', () => {
   it('follows open legs until they fill', async () => {
     const w = await world();
     const placed = await w.place([w.kiteA]);
-    w.kite.fillOrder(placed.legs[0]!.brokerOrderId!, 419.8);
+    w.kite.fillOrder(defined(defined(placed.legs[0]).brokerOrderId), 419.8);
     w.clock.advance(5_000);
     await w.s.reconciler.pollDue();
     expect((await w.s.orders.get(w.user.id, placed.parentOrderId)).legs[0]).toMatchObject({ status: 'FILLED', avgPrice: '419.80' });
@@ -410,7 +410,7 @@ describe('reconciliation', () => {
   it('treats a signed Kite postback as a reason to re-read the order', async () => {
     const w = await world();
     const placed = await w.place([w.kiteA]);
-    const id = placed.legs[0]!.brokerOrderId!;
+    const id = defined(defined(placed.legs[0]).brokerOrderId);
     w.kite.fillOrder(id, 420);
     const { createHash } = await import('node:crypto');
     const body = { order_id: id, order_timestamp: '2026-10-27 09:31:00', status: 'COMPLETE' };
@@ -428,7 +428,7 @@ describe('reconciliation', () => {
     w.kite.fill['kiteA'] = 'filled';
     const placed = await w.place([w.kiteA]);
     // The broker later reports something different from what we recorded.
-    const o = w.kite.orders.get(placed.legs[0]!.brokerOrderId!)!;
+    const o = defined(w.kite.orders.get(defined(defined(placed.legs[0]).brokerOrderId)));
     o.status = 'CANCELLED';
     o.filled_quantity = 0;
     // And it has an order tagged by us that we have no record of.
@@ -438,10 +438,10 @@ describe('reconciliation', () => {
     expect(result).toEqual({ accounts: 1, issues: 2 });
     const issues = await w.s.reconciler.openIssues();
     expect(issues.map((i) => i.kind).sort()).toEqual(['status_mismatch', 'unknown_order']);
-    expect((await w.s.orders.get(w.user.id, placed.parentOrderId)).legs[0]!.status).toBe('CANCELLED');
-    await w.s.reconciler.resolveIssue(issues[0]!.id);
+    expect(defined((await w.s.orders.get(w.user.id, placed.parentOrderId)).legs[0]).status).toBe('CANCELLED');
+    await w.s.reconciler.resolveIssue(defined(issues[0]).id);
     expect(await w.s.reconciler.openIssues()).toHaveLength(1);
-    await expect(w.s.reconciler.resolveIssue(issues[0]!.id)).rejects.toThrow('No open issue');
+    await expect(w.s.reconciler.resolveIssue(defined(issues[0]).id)).rejects.toThrow('No open issue');
   });
 });
 
@@ -457,8 +457,8 @@ describe('reads', () => {
       [first.parentOrderId, 1],
     ]);
     expect(await w.s.orders.list(w.user.id, 10, new Date(NOW.getTime() + 500))).toHaveLength(1);
-    const events = await w.s.orders.events(w.user.id, first.parentOrderId, first.legs[0]!.legId);
+    const events = await w.s.orders.events(w.user.id, first.parentOrderId, defined(first.legs[0]).legId);
     expect(events.length).toBeGreaterThan(1);
-    await expect(w.s.orders.events(w.user.id, first.parentOrderId, second.legs[0]!.legId)).rejects.toThrow('Leg not found');
+    await expect(w.s.orders.events(w.user.id, first.parentOrderId, defined(second.legs[0]).legId)).rejects.toThrow('Leg not found');
   });
 });

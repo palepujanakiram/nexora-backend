@@ -1,6 +1,6 @@
 import { AppError } from '../domain/errors.ts';
 import { hmacSha256, sameSecret } from '../data/crypto.ts';
-import { objectOf, type Fetch } from './http.ts';
+import { objectOf, type Fetch, textOf } from './http.ts';
 
 export const RAZORPAY_BASE = 'https://api.razorpay.com/v1';
 
@@ -64,8 +64,8 @@ export class RazorpayClient {
 export function toSubscription(e: Record<string, unknown>): RazorpaySubscription {
   const end = Number(e['current_end']);
   return {
-    id: String(e['id']),
-    status: String(e['status'] ?? ''),
+    id: textOf(e['id']),
+    status: textOf(e['status']),
     shortUrl: typeof e['short_url'] === 'string' ? e['short_url'] : null,
     currentEnd: Number.isFinite(end) && end > 0 ? new Date(end * 1000) : null,
   };

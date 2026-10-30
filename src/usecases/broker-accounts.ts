@@ -7,6 +7,7 @@ import type { Log } from '../logging.ts';
 import { accountView, credentialsFrom, decodeState, encodeState, flatten } from './account-rules.ts';
 import type { EntitlementService } from './entitlements.ts';
 import type { BrokerGateway } from './gateway.ts';
+import { must } from '../domain/invariant.ts';
 
 export interface LinkAccountInput {
   broker: string;
@@ -46,7 +47,7 @@ export class BrokerAccountService {
   }
 
   async list(userId: string) {
-    return Promise.all((await this.d.accounts.listForUser(userId)).map((a) => this.view(a)));
+    return Promise.all((await this.d.accounts.listForUser(userId)).map(async (a) => this.view(a)));
   }
 
   async get(userId: string, id: string) {
@@ -104,7 +105,7 @@ export class BrokerAccountService {
   /** The broker redirected the browser to us. [state] says which account. */
   async callback(broker: string, params: Record<string, string>) {
     const account = await this.d.accounts.find(decodeState(this.d.box, params['state'], this.d.clock()));
-    if (!account || account.broker !== broker) throw notFound('Broker account not found.');
+    if (account?.broker !== broker) throw notFound('Broker account not found.');
     return this.finish(account, params);
   }
 
@@ -115,7 +116,7 @@ export class BrokerAccountService {
       await this.d.accounts.setMode(id, patch.mode);
       this.d.log.info({ userId, accountId: id, mode: patch.mode, event: 'account_mode' }, 'broker account mode changed');
     }
-    return this.view((await this.d.accounts.find(id))!);
+    return this.view(must(await this.d.accounts.find(id), `account ${id} (just updated)`));
   }
 
   /** Unlinks the account and deletes its stored credentials. Past orders stay in the audit trail. */
@@ -168,7 +169,7 @@ export class BrokerAccountService {
       throw e;
     }
     this.d.log.info({ accountId: account.id, broker: account.broker, event: 'broker_login' }, 'broker session started');
-    return this.view((await this.d.accounts.find(account.id))!);
+    return this.view(must(await this.d.accounts.find(account.id), `account ${account.id} (just linked)`));
   }
 
   private async challenge(account: BrokerAccountRecord, adapter: BrokerAdapter, credentials: Credentials): Promise<LinkChallenge> {

@@ -18,7 +18,7 @@ async function world() {
   const link = async (label: string, mode: 'live' | 'paper', credentials: Record<string, string> = {}, broker = 'zerodha') =>
     (await s.brokerAccounts.link(user.id, { broker, label, mode, credentials })).account.id;
   let n = 0;
-  const buy = (accountIds: string[], quantity = 150) =>
+  const buy = async (accountIds: string[], quantity = 150) =>
     s.orders.place(user.id, {
       clientId: 'cl_test',
       idempotencyKey: `k${++n}`,

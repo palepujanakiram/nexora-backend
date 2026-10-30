@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
+import { must } from '../domain/invariant.ts';
+
 /**
  * Encrypts broker credentials and session tokens at rest with AES-256-GCM.
  * Each ciphertext names its key version (`v2:<base64 iv|tag|data>`), so keys
@@ -28,8 +30,8 @@ export class SecretBox {
   static fromConfig(spec: string, currentVersion: number | null): SecretBox {
     const keys = new Map<number, Buffer>();
     for (const part of spec.split(',').map((p) => p.trim()).filter(Boolean)) {
-      const m = /^(\d+):(.+)$/.exec(part);
-      if (m) keys.set(Number(m[1]), Buffer.from(m[2]!, 'base64'));
+      const [, version, key] = /^(\d+):(.+)$/.exec(part) ?? [];
+      if (version !== undefined && key !== undefined) keys.set(Number(version), Buffer.from(key, 'base64'));
       else keys.set(1, Buffer.from(part, 'base64'));
     }
     return new SecretBox(keys, currentVersion ?? Math.max(...keys.keys()));
@@ -37,16 +39,16 @@ export class SecretBox {
 
   encrypt(plain: string): string {
     const iv = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', this.keys.get(this.currentVersion)!, iv);
+    const cipher = createCipheriv('aes-256-gcm', must(this.keys.get(this.currentVersion), 'the current encryption key'), iv);
     const data = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
     return `v${this.currentVersion}:${Buffer.concat([iv, cipher.getAuthTag(), data]).toString('base64')}`;
   }
 
   decrypt(sealed: string): string {
-    const m = /^v(\d+):(.*)$/s.exec(sealed);
-    const key = m ? this.keys.get(Number(m[1])) : undefined;
-    if (!m || !key) throw new Error('Unknown secret format or key version.');
-    const raw = Buffer.from(m[2]!, 'base64');
+    const [, version, body] = /^v(\d+):(.*)$/s.exec(sealed) ?? [];
+    const key = version === undefined ? undefined : this.keys.get(Number(version));
+    if (!key || body === undefined) throw new Error('Unknown secret format or key version.');
+    const raw = Buffer.from(body, 'base64');
     const decipher = createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12));
     decipher.setAuthTag(raw.subarray(12, 28));
     return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8');

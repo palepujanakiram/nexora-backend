@@ -9,6 +9,7 @@ import type { LegActions } from './leg-actions.ts';
 import { legView, type LegView } from './legs.ts';
 import { alreadyExited, brokerErrorOf, heldAtBroker, newLeg } from './order-rules.ts';
 import type { OrderSupport } from './order-support.ts';
+import { must } from '../domain/invariant.ts';
 
 export interface ExitLegResult {
   accountId: string;
@@ -69,7 +70,7 @@ export class ExitService {
     return this.s.locked(parent.id, async () => {
       const scope: ExitScope = { userId, parent, instrument, earlier: await this.s.d.orders.exitLegs(parent.id) };
       const legs = await this.s.selectLegs(parent.id, req.accountIds);
-      const plans = await Promise.all(legs.map((leg) => this.plan(scope, leg)));
+      const plans = await Promise.all(legs.map(async (leg) => this.plan(scope, leg)));
       const results = plans.map((p) => p.result);
       const sends = plans.flatMap((p) => (p.send ? [p.send] : []));
       if (sends.length === 0) return { parentOrderId: parent.id, exitOrderId: null, exitStatus: null, legs: results };
@@ -80,7 +81,7 @@ export class ExitService {
         const leg = placed.find((l) => l.accountId === r.accountId);
         if (r.outcome === 'exit_placed' && leg) r.exitLeg = legView(leg);
       }
-      const exitStatus = (await this.s.d.orders.parent(exitParent.id))!.status;
+      const exitStatus = must(await this.s.d.orders.parent(exitParent.id), 'the exit order just created').status;
       return { parentOrderId: parent.id, exitOrderId: exitParent.id, exitStatus, legs: results };
     });
   }
@@ -96,8 +97,8 @@ export class ExitService {
     if (remaining <= 0) {
       return none({ accountId, outcome: 'nothing_to_exit', reason: leg.filledQty === 0 ? 'Nothing was filled.' : 'Already exited.', cancelledRemainder });
     }
-    const account = (await this.s.d.accounts.find(accountId))!;
-    const symbol = (await this.s.symbolFor(account, scope.instrument))!;
+    const account = must(await this.s.d.accounts.find(accountId), `account ${accountId} of an existing leg`);
+    const symbol = must(await this.s.symbolFor(account, scope.instrument), 'the broker symbol a filled leg was placed with');
     let position: ReturnType<typeof heldAtBroker>;
     try {
       position = heldAtBroker(await this.s.d.gateway.positions(accountId), symbol, scope.parent);
@@ -119,7 +120,7 @@ export class ExitService {
   private async closeRemainder(userId: string, start: Leg): Promise<{ leg: Leg; cancelledRemainder: boolean }> {
     if (isTerminal(start.status)) return { leg: start, cancelledRemainder: false };
     const cancelled = (await this.actions.cancel(userId, start)).outcome === 'cancelled';
-    return { leg: (await this.s.d.orders.leg(start.id))!, cancelledRemainder: cancelled };
+    return { leg: must(await this.s.d.orders.leg(start.id), `leg ${start.id}`), cancelledRemainder: cancelled };
   }
 
   /** Creates the EXIT order with one market leg per account and sends them. */
@@ -140,7 +141,7 @@ export class ExitService {
       product: parent.product,
       pricePaise: null,
       triggerPaise: null,
-      referencePricePaise: sends[0]!.ref,
+      referencePricePaise: must(sends[0], 'at least one exit to send').ref,
       algoId: this.s.d.algoId,
       idempotencyKey: req.idempotencyKey,
       status: 'IN_PROGRESS',
@@ -151,7 +152,7 @@ export class ExitService {
     const legs = sends.map((e) => ({ ...e, leg: newLeg(exitParent, e.account, e.qty, market, null) }));
     await this.s.d.orders.create(exitParent, legs.map((e) => e.leg));
     this.s.d.log.info({ parentOrderId: exitParent.id, correlationId: parent.id, userId, count: legs.length, op: 'exit' }, 'fan-out exit');
-    await Promise.all(legs.map((e) => this.s.submit(userId, { ...exitParent, referencePricePaise: e.ref }, e.leg, e.symbol)));
+    await Promise.all(legs.map(async (e) => this.s.submit(userId, { ...exitParent, referencePricePaise: e.ref }, e.leg, e.symbol)));
     return exitParent;
   }
 }

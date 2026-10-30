@@ -54,7 +54,7 @@ export class OrderService {
     const instrument = await this.s.instrument(intent.instrumentId);
     const problem = orderProblem(intent, instrument);
     if (problem) throw badRequest(problem);
-    const accounts = await Promise.all([...new Set(input.accountIds)].map((id) => this.s.ownedAccount(userId, id)));
+    const accounts = await Promise.all([...new Set(input.accountIds)].map(async (id) => this.s.ownedAccount(userId, id)));
     await this.d.risk.checkEntry(userId, intent, instrument, accounts.length, plan);
 
     const now = this.d.clock();
@@ -80,8 +80,9 @@ export class OrderService {
     );
     await this.d.orders.create(parent, planned.map((p) => p.leg));
     this.d.log.info({ parentOrderId: parent.id, userId, count: planned.length, op: 'place' }, 'fan-out place');
-    const toSend = planned.filter((p) => p.leg.status === 'PENDING_SUBMIT');
-    await Promise.all(toSend.map((p) => this.s.submit(userId, parent, p.leg, p.symbol!)));
+    // Pre-rejected legs (no symbol among them) were stored as REJECTED; the rest go to their brokers.
+    const toSend = planned.flatMap((p) => (p.leg.status === 'PENDING_SUBMIT' && p.symbol ? [{ leg: p.leg, symbol: p.symbol }] : []));
+    await Promise.all(toSend.map(async (p) => this.s.submit(userId, parent, p.leg, p.symbol)));
     return this.s.result(parent.id);
   }
 
@@ -90,7 +91,7 @@ export class OrderService {
     const parent = await this.s.ownedParent(userId, parentId);
     return this.s.locked(parent.id, async () => {
       const legs = await this.s.selectLegs(parent.id, accountIds);
-      return this.s.result(parent.id, await this.s.perLeg(legs, (leg) => this.actions.cancel(userId, leg)));
+      return this.s.result(parent.id, await this.s.perLeg(legs, async (leg) => this.actions.cancel(userId, leg)));
     });
   }
 
@@ -114,7 +115,7 @@ export class OrderService {
     };
     return this.s.locked(parent.id, async () => {
       const legs = await this.s.selectLegs(parent.id, input.accountIds);
-      return this.s.result(parent.id, await this.s.perLeg(legs, (leg) => this.actions.modify(userId, leg, target)));
+      return this.s.result(parent.id, await this.s.perLeg(legs, async (leg) => this.actions.modify(userId, leg, target)));
     });
   }
 
@@ -138,19 +139,19 @@ export class OrderService {
   async events(userId: string, parentId: string, legId: string) {
     await this.s.ownedParent(userId, parentId);
     const leg = await this.d.orders.leg(legId);
-    if (!leg || leg.parentOrderId !== parentId) throw notFound('Leg not found.');
+    if (leg?.parentOrderId !== parentId) throw notFound('Leg not found.');
     return this.d.orders.events(legId);
   }
 
-  beginIdempotent(userId: string, key: string, operation: string, requestHash: string) {
+  async beginIdempotent(userId: string, key: string, operation: string, requestHash: string) {
     return this.d.orders.beginIdempotent(userId, key, operation, requestHash, this.d.clock());
   }
 
-  finishIdempotent(userId: string, key: string, statusCode: number, response: unknown) {
+  async finishIdempotent(userId: string, key: string, statusCode: number, response: unknown) {
     return this.d.orders.finishIdempotent(userId, key, statusCode, response);
   }
 
-  releaseIdempotent(userId: string, key: string) {
+  async releaseIdempotent(userId: string, key: string) {
     return this.d.orders.releaseIdempotent(userId, key);
   }
 }

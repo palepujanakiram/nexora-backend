@@ -1,4 +1,5 @@
 import { SignalParseError } from './errors.ts';
+import { must } from './invariant.ts';
 import { istDate } from './ist.ts';
 import { normalizeSignalText, type TradeSignal } from './signal.ts';
 
@@ -52,9 +53,9 @@ export class SignalParser {
         'Could not find "<BUY|SELL> <SYMBOL> <DD> <MON> <STRIKE> <CALL|PUT>" in the signal.',
       );
     }
-    const [, actionText, underlying, dayText, monthText, yearText, strikeText, typeText] = head as unknown as string[];
+    const [, actionText, underlying = '', dayText, monthText = '', yearText, strikeText, typeText] = head;
     const action = actionText === 'BUY' ? 'BUY' : 'SELL';
-    const expiry = this.expiry(Number(dayText), MONTHS[monthText!]!, yearText);
+    const expiry = this.expiry(Number(dayText), must(MONTHS[monthText], 'a month the pattern matched'), yearText);
     const optionType = typeText === 'CE' || typeText === 'CALL' ? 'CE' : 'PE';
 
     const tail = text.slice(head.index + head[0].length);
@@ -87,7 +88,7 @@ export class SignalParser {
 
     return {
       action,
-      underlying: underlying!,
+      underlying,
       expiry,
       strike: Number(strikeText),
       optionType,

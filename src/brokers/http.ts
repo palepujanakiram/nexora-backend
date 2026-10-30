@@ -139,7 +139,7 @@ export class BrokerHttp {
     let res: Response;
     let text: string;
     try {
-      res = await Promise.race([this.o.fetch(req.url, { method: req.method, headers, body, signal: controller.signal }), timeout]);
+      res = await Promise.race([this.o.fetch(req.url, { method: req.method, headers, signal: controller.signal, ...(body === undefined ? {} : { body }) }), timeout]);
       text = decode(Buffer.from(await Promise.race([res.arrayBuffer(), timeout])));
     } catch (e) {
       if (e instanceof BrokerError) throw e;
@@ -159,6 +159,20 @@ export class BrokerHttp {
     return { status: res.status, body: parsed, text, raw };
   }
 }
+
+/**
+ * A broker field as text: strings as they are, numbers and booleans
+ * formatted, anything else (missing, null, an object) as [fallback]. Broker
+ * payloads are untyped JSON, so this never prints `[object Object]`.
+ */
+export function textOf(value: unknown, fallback = ''): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return fallback;
+}
+
+/** A CSV or JSON text field that may be blank: the text, or null when missing or empty. */
+export const nonEmpty = (value: string | undefined): string | null => (value === undefined || value === '' ? null : value);
 
 /** The JSON object in [r], or an empty one. */
 export const objectOf = (r: unknown): Record<string, unknown> =>
@@ -190,7 +204,8 @@ export function parseCsv(text: string): Record<string, string>[] {
     const cells = splitCsv(line);
     const row: Record<string, string> = {};
     header.forEach((h, i) => {
-      if (i < cells.length) row[h] = cells[i]!;
+      const cell = cells[i];
+      if (cell !== undefined) row[h] = cell;
     });
     rows.push(row);
   }

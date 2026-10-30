@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "user:create": "node dist/cli.js create-user"
+    "user:create": "node dist/cli.js create-user",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.13",
@@ -29,11 +30,14 @@
   },
   "devDependencies": {
     "@electric-sql/pglite-socket": "^0.2.16",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.2",
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.2",
     "@vitest/coverage-v8": "^5.0.5",
+    "eslint": "^10.13.0",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^5.0.5"
   }
 }

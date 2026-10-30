@@ -46,7 +46,7 @@ export class Msg91Sms implements OtpChannel {
     });
     let res: Response;
     try {
-      res = await this.args.fetch(`${MSG91_BASE}/otp?${query}`, {
+      res = await this.args.fetch(`${MSG91_BASE}/otp?${query.toString()}`, {
         method: 'POST',
         headers: { authkey: this.args.authKey, accept: 'application/json', 'content-type': 'application/json' },
         body: '{}',

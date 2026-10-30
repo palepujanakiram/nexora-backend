@@ -9,6 +9,7 @@ import type { Services } from '../container.ts';
 import { sameSecret, sha256 } from '../data/crypto.ts';
 import { BrokerError } from '../domain/broker-error.ts';
 import { AppError, badRequest, unauthorized } from '../domain/errors.ts';
+import { must } from '../domain/invariant.ts';
 import { traceFrom, traceparent, type TraceContext } from '../logging.ts';
 import type { Principal } from '../usecases/identity.ts';
 import { adminRoutes } from './routes/admin.ts';
@@ -22,25 +23,28 @@ import { streamRoutes } from './routes/stream.ts';
 declare module 'fastify' {
   interface FastifyRequest {
     principal: Principal | null;
-    trace: TraceContext;
+    /** Set by the first onRequest hook; null only before it runs. */
+    trace: TraceContext | null;
   }
 }
 
 /** The signed-in caller. Only call from routes registered behind [requireUser]. */
-export const principalOf = (request: FastifyRequest): Principal => request.principal!;
+export const principalOf = (request: FastifyRequest): Principal => must(request.principal, 'a signed-in caller (the route is behind requireUser)');
 
 /** The token from `Authorization: Bearer <token>`. */
 export function bearerToken(request: FastifyRequest): string {
-  const match = /^Bearer\s+(\S+)$/i.exec(request.headers.authorization ?? '');
-  if (!match) throw unauthorized();
-  return match[1]!;
+  const [, token] = /^Bearer\s+(\S+)$/i.exec(request.headers.authorization ?? '') ?? [];
+  if (!token) throw unauthorized();
+  return token;
 }
 
 /** Builds the HTTP API. Doesn't listen; call `listen` or use `inject` in tests. */
 export async function buildApp(s: Services): Promise<FastifyInstance> {
   const { config } = s;
+  // Typed as Fastify's base logger (a checked assignment, not a cast) so the app's type stays the default instance.
+  const loggerInstance: FastifyBaseLogger = s.logger;
   const app = Fastify({
-    loggerInstance: s.logger as FastifyBaseLogger,
+    loggerInstance,
     // Fly's proxy sits in front, so the client IP is in X-Forwarded-For.
     trustProxy: true,
     bodyLimit: 256 * 1024,
@@ -48,11 +52,12 @@ export async function buildApp(s: Services): Promise<FastifyInstance> {
   });
 
   app.decorateRequest('principal', null);
-  app.decorateRequest('trace', null as unknown as TraceContext);
+  app.decorateRequest('trace', null);
   app.addHook('onRequest', async (request, reply) => {
-    request.trace = traceFrom(request.headers.traceparent);
-    request.log = request.log.child({ traceId: request.trace.traceId, spanId: request.trace.spanId });
-    reply.header('traceparent', traceparent(request.trace));
+    const trace = traceFrom(request.headers['traceparent']);
+    request.trace = trace;
+    request.log = request.log.child({ traceId: trace.traceId, spanId: trace.spanId });
+    reply.header('traceparent', traceparent(trace));
   });
 
   await app.register(cors, {

@@ -2,6 +2,7 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto';
 
 import { loadConfig } from './config.ts';
 import { createServices } from './container.ts';
+import { CLIENT_PLATFORMS, isClientPlatform, type ClientPlatform } from './data/identity.ts';
 import { e164 } from './domain/phone.ts';
 
 const USAGE = `Usage:
@@ -23,16 +24,17 @@ export async function runCli(args: string[], env: Record<string, string | undefi
   }
   if (command !== 'create-user' && command !== 'create-client' && command !== 'migrate') throw new Error(USAGE);
   if (command !== 'migrate' && !a) throw new Error(USAGE);
+  // Arguments are checked before the database is opened.
+  const platform = command === 'create-client' ? platformOf(b) : 'other';
   const services = await createServices(loadConfig(env));
   try {
-    if (command === 'migrate') return 'Database is up to date.';
+    if (command === 'migrate' || !a) return 'Database is up to date.';
     if (command === 'create-user') {
-      const user = await services.identity.registerUser({ phone: a!, email: b ?? null });
+      const user = await services.identity.registerUser({ phone: a, email: b ?? null });
       return `Created user ${e164(user.phone)} (${user.id}).`;
     }
-    const platform = (b ?? 'other') as 'web' | 'ios' | 'android' | 'partner' | 'other';
     const client = await services.identity.registerClient({
-      name: a!,
+      name: a,
       platform,
       grantTypes: ['otp', 'refresh_token'],
       accessTtlSeconds: 900,
@@ -42,6 +44,13 @@ export async function runCli(args: string[], env: Record<string, string | undefi
   } finally {
     await services.db.close();
   }
+}
+
+/** The client platform named on the command line (default `other`). */
+function platformOf(arg: string | undefined): ClientPlatform {
+  const platform = arg ?? 'other';
+  if (!isClientPlatform(platform)) throw new Error(`Unknown platform "${platform}". Use one of: ${CLIENT_PLATFORMS.join(', ')}.`);
+  return platform;
 }
 
 /** Runs a command and returns the process exit code; output goes through [io]. */

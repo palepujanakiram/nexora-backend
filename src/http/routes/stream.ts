@@ -22,7 +22,7 @@ export const streamRoutes =
         socket.close(4401, e instanceof AppError ? e.message.slice(0, 100) : 'Unauthorized');
         return;
       }
-      const unsubscribe = events.subscribe(userId, (event) => socket.send(JSON.stringify(event)));
+      const unsubscribe = events.subscribe(userId, (event) => { socket.send(JSON.stringify(event)); });
       socket.on('close', unsubscribe);
       socket.send(JSON.stringify({ type: 'ready' }));
     });

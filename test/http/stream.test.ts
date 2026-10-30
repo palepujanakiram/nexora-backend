@@ -4,9 +4,13 @@ import type WebSocket from 'ws';
 
 import { InstrumentRepository } from '../../src/data/instruments.ts';
 import { signIn, testApp } from '../app.ts';
-import { NOW } from '../helpers.ts';
+import { NOW, noop, parseJson } from '../helpers.ts';
 
 const INSTRUMENT = 'NFO:CE:NIFTY:2026-10-29:2450000';
+
+/** A frame's payload as text: ws hands it over as a Buffer, a list of Buffers or an ArrayBuffer. */
+const frameText = (data: WebSocket.RawData) =>
+  Buffer.isBuffer(data) ? data.toString('utf8') : Array.isArray(data) ? Buffer.concat(data).toString('utf8') : Buffer.from(data).toString('utf8');
 
 /**
  * Opens `/stream`, collecting every message and the close code from the very
@@ -16,16 +20,16 @@ const INSTRUMENT = 'NFO:CE:NIFTY:2026-10-29:2450000';
 async function connect(app: FastifyInstance, path: string, headers: Record<string, string> = {}) {
   await app.ready();
   const messages: Record<string, unknown>[] = [];
-  let resolveClose: (v: { code: number; reason: string }) => void = () => {};
+  let resolveClose: (v: { code: number; reason: string }) => void = noop;
   const closed = new Promise<{ code: number; reason: string }>((r) => (resolveClose = r));
   const waiters: (() => void)[] = [];
   const ws: WebSocket = await app.injectWS(path, { headers, socket: { remoteAddress: '127.0.0.1' } } as never, {
     onInit: (socket) => {
       socket.on('message', (data) => {
-        messages.push(JSON.parse(String(data)));
+        messages.push(parseJson(frameText(data)) as Record<string, unknown>);
         for (const w of waiters.splice(0)) w();
       });
-      socket.on('close', (code, reason) => resolveClose({ code, reason: String(reason) }));
+      socket.on('close', (code, reason) => { resolveClose({ code, reason: String(reason) }); });
     },
   });
   const until = async (pred: () => boolean) => {
@@ -43,7 +47,7 @@ describe('WS /stream', () => {
       NOW,
     );
     const me = await signIn(t);
-    const paper = (await t.app.inject({ method: 'POST', url: '/broker-accounts', headers: me.headers, payload: { broker: 'zerodha', label: 'Paper' } })).json().account.id;
+    const paper = (await t.app.inject({ method: 'POST', url: '/broker-accounts', headers: me.headers, payload: { broker: 'zerodha', label: 'Paper' } })).json<{ account: { id: string } }>().account.id;
 
     const s = await connect(t.app, `/stream?access_token=${me.accessToken}`);
     await s.until(() => s.messages.length >= 1);

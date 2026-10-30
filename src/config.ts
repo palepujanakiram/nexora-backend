@@ -23,7 +23,7 @@ const ConfigSchema = z
     PORT: z.coerce.number().int().min(0).max(65535).default(8080),
     HOST: z.string().default('0.0.0.0'),
     /** The server's public base URL, for broker redirects and checkout links. */
-    PUBLIC_URL: z.string().url().default('http://localhost:8080'),
+    PUBLIC_URL: z.url().default('http://localhost:8080'),
 
     /** `postgres://…`, or `pglite:<dir>` / `pglite:memory` for local development without a server. */
     DATABASE_URL: z.string({ error: 'DATABASE_URL is required (postgres://user:pass@host/db).' }).min(1),
@@ -96,7 +96,7 @@ const ConfigSchema = z
     AUTH_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(10),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   })
-  .refine((c) => c.ENCRYPTION_KEYS || c.ENCRYPTION_KEY, {
+  .refine((c) => (c.ENCRYPTION_KEYS ?? c.ENCRYPTION_KEY) !== null, {
     path: ['ENCRYPTION_KEYS'],
     message: 'ENCRYPTION_KEYS (or ENCRYPTION_KEY) is required (openssl rand -base64 32)',
   })

@@ -4,7 +4,7 @@ import { SettingsRepository } from '../../src/data/settings.ts';
 import { Scheduler, type Job } from '../../src/usecases/jobs.ts';
 import { testClock } from '../app.ts';
 import { testDb } from '../db.ts';
-import { memoryLog } from '../helpers.ts';
+import { memoryLog, asyncNoop } from '../helpers.ts';
 
 const MIN = 60_000;
 
@@ -97,7 +97,7 @@ describe('Scheduler', () => {
     const every = counting({ name: 'analytics', everyMs: MIN });
     const t = await scheduler([every.job]);
     let release!: () => void;
-    const held = t.db.withLock('job:analytics', 1000, () => new Promise<void>((r) => (release = r)));
+    const held = t.db.withLock('job:analytics', 1000, async () => new Promise<void>((r) => (release = r)));
     await new Promise((r) => setTimeout(r, 5));
     expect(await t.scheduler.runDue()).toEqual([]);
     expect(every.state.runs).toBe(0);
@@ -125,7 +125,7 @@ describe('Scheduler', () => {
       settings: { jobState: async () => Promise.reject(new Error('db down')) } as unknown as SettingsRepository,
       clock: t.clock,
       log: t.log,
-      jobs: [{ name: 'daily', dailyAt: [0, 0], run: async () => {} }],
+      jobs: [{ name: 'daily', dailyAt: [0, 0], run: asyncNoop }],
     });
     broken.start(5);
     await new Promise((r) => setTimeout(r, 30));

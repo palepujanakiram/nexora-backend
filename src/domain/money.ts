@@ -36,4 +36,13 @@ export function brokerRupeesToPaise(value: unknown): Paise | null {
   return Math.round(n * 100);
 }
 
+/**
+ * A broker's price field as paise, or null when it's missing or zero. Brokers
+ * send 0 for "no price" (market orders) and "no trigger".
+ */
+export function positivePaise(value: unknown): Paise | null {
+  const paise = brokerRupeesToPaise(value);
+  return paise !== null && paise > 0 ? paise : null;
+}
+
 export const isOnTick = (paise: Paise, tick: Paise) => paise % tick === 0;

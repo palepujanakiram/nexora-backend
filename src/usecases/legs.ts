@@ -6,6 +6,7 @@ import { isTerminal } from '../domain/order.ts';
 import type { Log } from '../logging.ts';
 import type { EventBus } from './events.ts';
 import type { BrokerGateway } from './gateway.ts';
+import { must } from '../domain/invariant.ts';
 
 /** How a leg is shown to clients. */
 export function legView(l: Leg) {
@@ -69,7 +70,7 @@ export class LegTracker {
       );
     }
     const parent = await this.d.orders.parent(leg.parentOrderId);
-    this.d.events.publish(userId, { type: 'leg', parentOrderId: leg.parentOrderId, parentStatus: parent!.status, leg: legView(updated) });
+    this.d.events.publish(userId, { type: 'leg', parentOrderId: leg.parentOrderId, parentStatus: must(parent, 'the leg\'s parent order').status, leg: legView(updated) });
     return updated;
   }
 

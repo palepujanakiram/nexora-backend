@@ -21,6 +21,7 @@ import { BrokerError } from '../domain/broker-error.ts';
 import { notFound } from '../domain/errors.ts';
 import type { Log } from '../logging.ts';
 import type { EventBus } from './events.ts';
+import { must } from '../domain/invariant.ts';
 
 /**
  * A token bucket per broker account (not per process): a fan-out to five
@@ -121,7 +122,7 @@ export class BrokerGateway {
         timeoutMs: this.d.timeoutMs,
         dryRun: this.dryRun,
         log: this.d.log.child({ accountId: account.id, broker: adapter.code }),
-        acquire: () => this.d.limiter.acquire(account.id, adapter.capabilities.ratePerSecond),
+        acquire: async () => this.d.limiter.acquire(account.id, adapter.capabilities.ratePerSecond),
       }),
     };
   }
@@ -177,27 +178,27 @@ export class BrokerGateway {
   }
 
   async place(accountId: string, req: PlaceRequest): Promise<BrokerAck> {
-    return this.withAccount(accountId, (a, ctx) => a.placeOrder(ctx, req));
+    return this.withAccount(accountId, async (a, ctx) => a.placeOrder(ctx, req));
   }
 
   async modify(accountId: string, req: ModifyRequest): Promise<BrokerAck> {
-    return this.withAccount(accountId, (a, ctx) => a.modifyOrder(ctx, req));
+    return this.withAccount(accountId, async (a, ctx) => a.modifyOrder(ctx, req));
   }
 
   async cancel(accountId: string, brokerOrderId: string): Promise<BrokerAck> {
-    return this.withAccount(accountId, (a, ctx) => a.cancelOrder(ctx, brokerOrderId));
+    return this.withAccount(accountId, async (a, ctx) => a.cancelOrder(ctx, brokerOrderId));
   }
 
   async getOrder(accountId: string, brokerOrderId: string): Promise<BrokerOrder> {
-    return this.withAccount(accountId, (a, ctx) => a.getOrder(ctx, brokerOrderId));
+    return this.withAccount(accountId, async (a, ctx) => a.getOrder(ctx, brokerOrderId));
   }
 
   async listOrders(accountId: string): Promise<BrokerOrder[]> {
-    return this.withAccount(accountId, (a, ctx) => a.listOrders(ctx));
+    return this.withAccount(accountId, async (a, ctx) => a.listOrders(ctx));
   }
 
   async positions(accountId: string): Promise<BrokerPosition[]> {
-    return this.withAccount(accountId, (a, ctx) => a.getPositions(ctx));
+    return this.withAccount(accountId, async (a, ctx) => a.getPositions(ctx));
   }
 
   /** Whether [req] is allowed on [current] by the account's broker. */
@@ -237,7 +238,7 @@ export class BrokerGateway {
     if (!(await this.ensureSession(account))) {
       throw new BrokerError('AUTH_EXPIRED', 'The broker session has expired. Log in to this account again.');
     }
-    account = (await this.d.accounts.find(accountId))!;
+    account = must(await this.d.accounts.find(accountId), `account ${accountId}`);
     const adapter = this.adapterFor(account);
     try {
       return await fn(adapter, this.context(account, adapter));

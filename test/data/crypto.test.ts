@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
 import { SecretBox, hmacSha256, newClientRef, newId, newToken, sameSecret, sha256 } from '../../src/data/crypto.ts';
-import { TEST_KEY } from '../helpers.ts';
+import { TEST_KEY, defined } from '../helpers.ts';
 
 const KEY2 = Buffer.alloc(32, 9).toString('base64');
 
@@ -46,7 +46,7 @@ describe('SecretBox', () => {
     expect(() => box.decrypt('plain text')).toThrow('Unknown secret format or key version.');
     const sealed = box.encrypt('hello');
     const raw = Buffer.from(sealed.slice(3), 'base64');
-    raw[raw.length - 1]! ^= 1;
+    raw[raw.length - 1] = defined(raw[raw.length - 1]) ^ 1;
     expect(() => box.decrypt(`v1:${raw.toString('base64')}`)).toThrow();
   });
 });

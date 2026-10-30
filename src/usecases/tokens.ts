@@ -1,5 +1,7 @@
 import { createPrivateKey, createPublicKey, sign, verify, type KeyObject } from 'node:crypto';
 
+import { z } from 'zod';
+
 import { unauthorized } from '../domain/errors.ts';
 
 /**
@@ -21,6 +23,21 @@ export interface AccessClaims {
 export interface PublicKeyEntry {
   kid: string;
   pem: string;
+}
+
+const JwtHeader = z.object({ alg: z.string(), kid: z.string().optional() });
+const Claims = z.object({ iss: z.string(), sub: z.string(), aud: z.string(), sid: z.string(), iat: z.number(), exp: z.number() });
+
+/** One base64url JWT segment parsed and checked against [schema], or null when it isn't one. */
+function decodePart<T>(schema: z.ZodType<T>, part: string): T | null {
+  let json: unknown;
+  try {
+    json = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+  const result = schema.safeParse(json);
+  return result.success ? result.data : null;
 }
 
 const b64url = (data: Buffer | string) => Buffer.from(data).toString('base64url');
@@ -59,21 +76,16 @@ export class TokenSigner {
   verify(token: string): AccessClaims {
     const parts = token.split('.');
     if (parts.length !== 3) throw unauthorized('Invalid access token.');
-    const [h, p, s] = parts as [string, string, string];
-    let header: { alg?: string; kid?: string };
-    let claims: AccessClaims;
-    try {
-      header = JSON.parse(Buffer.from(h, 'base64url').toString('utf8'));
-      claims = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
-    } catch {
-      throw unauthorized('Invalid access token.');
-    }
+    const [h = '', p = '', s = ''] = parts;
+    const header = decodePart(JwtHeader, h);
+    const claims = decodePart(Claims, p);
+    if (!header || !claims) throw unauthorized('Invalid access token.');
     const key = header.kid ? this.publicKeys.get(header.kid) : undefined;
     if (header.alg !== 'EdDSA' || !key || !verify(null, Buffer.from(`${h}.${p}`), key, Buffer.from(s, 'base64url'))) {
       throw unauthorized('Invalid access token.');
     }
     if (claims.iss !== this.issuer) throw unauthorized('Invalid access token.');
-    if (typeof claims.exp !== 'number' || claims.exp * 1000 <= this.clock().getTime()) {
+    if (claims.exp * 1000 <= this.clock().getTime()) {
       throw unauthorized('Your access token has expired. Refresh it.');
     }
     return claims;

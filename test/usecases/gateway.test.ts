@@ -6,7 +6,7 @@ import { BrokerError } from '../../src/domain/broker-error.ts';
 import type { StreamEvent } from '../../src/usecases/events.ts';
 import { RateLimiter } from '../../src/usecases/gateway.ts';
 import { harness } from '../app.ts';
-import { fakeFetch, json, jsonOf, text, NOW } from '../helpers.ts';
+import { fakeFetch, json, jsonOf, text, NOW, defined } from '../helpers.ts';
 
 const ANGEL_REFRESH = 'https://apiconnect.angelone.in/rest/auth/angelbroking/jwt/v1/generateTokens';
 const ANGEL_POSITIONS = 'https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getPosition';
@@ -64,7 +64,7 @@ describe('RateLimiter', () => {
 function network() {
   const routes = new Map<string, () => Response>();
   const fetch = fakeFetch((url) => {
-    const route = routes.get(url.split('?')[0]!);
+    const route = routes.get(defined(url.split('?')[0]));
     if (!route) throw new Error(`Unexpected network call to ${url}`);
     return route();
   });
@@ -86,7 +86,7 @@ async function world(env: Record<string, string> = {}) {
     if (token) await s.gateway.saveToken(id, { accessToken: 'JWT1', ...token });
     return id;
   };
-  const find = async (id: string) => (await accounts.find(id))!;
+  const find = async (id: string) => defined(await accounts.find(id));
   return { ...h, s, net, user, events, accounts, link, angel, find };
 }
 
@@ -153,7 +153,7 @@ describe('BrokerGateway', () => {
       w.net.routes.set(ANGEL_REFRESH, () => json({ status: true, message: 'SUCCESS', data: { jwtToken: 'Bearer JWT2', refreshToken: 'RT2' } }));
       expect(await w.s.gateway.ensureSession(await w.find(id))).toBe(true);
       expect(jsonOf(w.fetch.calls[0])).toEqual({ refreshToken: 'RT1' });
-      expect(w.fetch.calls[0]!.headers['Authorization']).toBe('Bearer JWT1');
+      expect(defined(w.fetch.calls[0]).headers['Authorization']).toBe('Bearer JWT1');
       const account = await w.find(id);
       // Angel sessions last until midnight IST.
       expect(account).toMatchObject({ tokenState: 'valid', tokenExpiresAt: new Date('2026-10-27T18:30:00Z') });
@@ -202,7 +202,7 @@ describe('BrokerGateway', () => {
       w.net.routes.set(ANGEL_REFRESH, () => json({ status: true, data: { jwtToken: 'JWT2', refreshToken: 'RT2' } }));
       w.net.routes.set(ANGEL_POSITIONS, () => json({ status: true, data: null }));
       expect(await w.s.gateway.positions(id)).toEqual([]);
-      expect(w.fetch.calls[1]!.headers['Authorization']).toBe('Bearer JWT2');
+      expect(defined(w.fetch.calls[1]).headers['Authorization']).toBe('Bearer JWT2');
     });
 
     it('flags the account for re-linking when the broker rejects the session mid-call', async () => {
@@ -267,7 +267,7 @@ describe('BrokerGateway', () => {
       w.net.routes.set(KITE_INSTRUMENTS, () => text(KITE_CSV));
       const rows = await w.s.gateway.instrumentMaster('zerodha');
       expect(rows).toEqual([expect.objectContaining({ type: 'CE', underlying: 'NIFTY', strikePaise: 2_450_000, symbol: { nativeId: '12345', tradingSymbol: 'NIFTY26O2924500CE', exchange: 'NFO' } })]);
-      expect(w.fetch.calls[0]!.headers['Authorization']).toBe('token kk:AT');
+      expect(defined(w.fetch.calls[0]).headers['Authorization']).toBe('token kk:AT');
     });
 
     it('downloads Groww\'s public list without any account', async () => {
@@ -288,7 +288,7 @@ describe('BrokerGateway', () => {
         ['CE', 'NIFTY', 'NSE:FNO'],
       ]);
       expect(w.fetch.calls).toHaveLength(1);
-      expect(w.fetch.calls[0]!.url).toBe(GROWW_CSV);
+      expect(defined(w.fetch.calls[0]).url).toBe(GROWW_CSV);
     });
   });
 });

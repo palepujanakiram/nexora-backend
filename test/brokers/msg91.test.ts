@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ConsoleOtp, MSG91_BASE, Msg91Sms } from '../../src/brokers/msg91.ts';
 import { OtpProviderError } from '../../src/domain/errors.ts';
-import { fakeFetch, json, text, type FakeFetch } from '../helpers.ts';
+import { fakeFetch, json, text, type FakeFetch, defined } from '../helpers.ts';
 
 const sms = (fetch: FakeFetch) => new Msg91Sms({ fetch, authKey: 'AUTHKEY', templateId: 'TPL1' });
 const to = { phone: '919876543210', email: null };
@@ -25,7 +25,7 @@ describe('Msg91Sms', () => {
     expect(channel.canReach()).toBe(true);
     await channel.send(to, '123456', 5);
     expect(fetch.calls).toHaveLength(1);
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     const url = new URL(call.url);
     expect(`${url.origin}${url.pathname}`).toBe(`${MSG91_BASE}/otp`);
     expect(Object.fromEntries(url.searchParams)).toEqual({

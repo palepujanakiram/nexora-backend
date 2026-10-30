@@ -7,7 +7,7 @@ type Row = Record<string, unknown>;
 const isoDay = (d: unknown): string | null => {
   if (d === null || d === undefined) return null;
   if (d instanceof Date) return d.toISOString().slice(0, 10);
-  return String(d).slice(0, 10);
+  return typeof d === 'string' ? d.slice(0, 10) : null;
 };
 
 const toInstrument = (r: Row): Instrument => ({

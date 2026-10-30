@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { BrokerError } from '../../src/domain/broker-error.ts';
 import { UpstoxAdapter, upstoxStatus } from '../../src/brokers/upstox/index.ts';
 import type { ModifyRequest, PlaceRequest } from '../../src/brokers/adapter.ts';
-import { clock, ctx, fakeFetch, formOf, json, jsonOf, text } from '../helpers.ts';
+import { clock, ctx, fakeFetch, formOf, json, jsonOf, text, defined } from '../helpers.ts';
 
 const upstox = new UpstoxAdapter({ clock });
 const SYMBOL = { nativeId: 'BSE_FO|1150410', tradingSymbol: 'SENSEX 73100 PE 29 OCT 26', exchange: 'BSE_FO' };
@@ -86,7 +86,7 @@ describe('UpstoxAdapter auth', () => {
     const fetch = fakeFetch(() => json({ email: 'x', access_token: 'AT1', user_id: 'U1' }));
     const tokens = await upstox.completeLink(ctx(fetch, REDIRECT), { params: { url: 'https://app.example/cb?code=C0DE&state=S1' } });
     expect(tokens).toEqual({ accessToken: 'AT1', refreshToken: null, expiresAt: new Date('2026-10-27T22:00:00Z') });
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(`${call.method} ${call.url}`).toBe('POST https://api.upstox.com/v2/login/authorization/token');
     expect(call.headers['Authorization']).toBeUndefined();
     expect(formOf(call)).toEqual({
@@ -120,7 +120,7 @@ describe('UpstoxAdapter orders', () => {
     const fetch = fakeFetch(() => ok({ order_ids: ['2501'] }));
     const ack = await upstox.placeOrder(ctx(fetch), place({ orderType: 'SL', triggerPaise: 41000 }));
     expect(ack.brokerOrderId).toBe('2501');
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(`${call.method} ${call.url}`).toBe('POST https://api-hft.upstox.com/v3/order/place');
     expect(call.headers['Authorization']).toBe('Bearer AT');
     expect(call.headers['Accept']).toBe('application/json');
@@ -154,7 +154,7 @@ describe('UpstoxAdapter orders', () => {
     const fetch = fakeFetch(() => fail(401, 'UDAPI100050', 'Invalid token used to access API'));
     const e = await brokerError(upstox.placeOrder(ctx(fetch, { token: null }), place()));
     expect(e.code).toBe('AUTH_EXPIRED');
-    expect(fetch.calls[0]!.headers['Authorization']).toBe('Bearer ');
+    expect(defined(fetch.calls[0]).headers['Authorization']).toBe('Bearer ');
   });
 
   it('maps Upstox errors into the shared taxonomy', async () => {
@@ -219,9 +219,9 @@ describe('UpstoxAdapter orders', () => {
       brokerOrderId: '2501', status: 'PARTIALLY_FILLED', quantity: 40, filledQty: 20, avgPricePaise: 42005, pricePaise: 42100,
       triggerPaise: null, orderType: 'LIMIT', clientRef: 'NXabc123', message: null,
     });
-    expect(fetch.calls[0]!.url).toBe('https://api.upstox.com/v2/order/details?order_id=2501');
-    expect(fetch.calls[0]!.method).toBe('GET');
-    expect(fetch.calls[0]!.headers['Authorization']).toBe('Bearer AT');
+    expect(defined(fetch.calls[0]).url).toBe('https://api.upstox.com/v2/order/details?order_id=2501');
+    expect(defined(fetch.calls[0]).method).toBe('GET');
+    expect(defined(fetch.calls[0]).headers['Authorization']).toBe('Bearer AT');
   });
 
   it('reports a missing order as NOT_FOUND and read errors as UNKNOWN', async () => {
@@ -243,7 +243,7 @@ describe('UpstoxAdapter orders', () => {
     expect(orders[0]).toMatchObject({ status: 'REJECTED', message: 'RMS: margin', orderType: 'SL_M', triggerPaise: 41000, avgPricePaise: null, clientRef: null });
     expect(orders[1]).toMatchObject({ status: 'FILLED', filledQty: 40, avgPricePaise: 42005, orderType: 'MARKET' });
     expect(orders[2]).toMatchObject({ status: 'SUBMITTED', orderType: null, quantity: 0, pricePaise: null });
-    expect(fetch.calls[0]!.url).toBe('https://api.upstox.com/v2/order/retrieve-all');
+    expect(defined(fetch.calls[0]).url).toBe('https://api.upstox.com/v2/order/retrieve-all');
     expect(await upstox.listOrders(ctx(fakeFetch(() => ok(null))))).toEqual([]);
     expect(await upstox.listOrders(ctx(fakeFetch(() => json({ status: 'success', data: [{ order_id: '4' }] }))))).toMatchObject([
       { brokerOrderId: '4', status: 'SUBMITTED' },
@@ -289,8 +289,8 @@ describe('UpstoxAdapter positions, instruments and webhooks', () => {
     });
     expect(positions[2]).toMatchObject({ product: 'INTRADAY', netQty: 1 });
     expect(positions[3]).toMatchObject({ product: 'CARRYFORWARD', netQty: 0 });
-    expect(fetch.calls[0]!.url).toBe('https://api.upstox.com/v2/portfolio/short-term-positions');
-    expect(fetch.calls[0]!.headers['Authorization']).toBe('Bearer AT');
+    expect(defined(fetch.calls[0]).url).toBe('https://api.upstox.com/v2/portfolio/short-term-positions');
+    expect(defined(fetch.calls[0]).headers['Authorization']).toBe('Bearer AT');
     expect(await upstox.getPositions(ctx(fakeFetch(() => ok(null))))).toEqual([]);
   });
 
@@ -316,7 +316,7 @@ describe('UpstoxAdapter positions, instruments and webhooks', () => {
       // No underlying_symbol: falls back to the name. No expiry: null.
       { exchange: 'NFO', type: 'CE', underlying: 'BANKNIFTY', expiry: null, strikePaise: 5000000, lotSize: 30, tickPaise: 5, symbol: { nativeId: 'NSE_FO|4', tradingSymbol: 'BANKNIFTY 50000 CE', exchange: 'NSE_FO' } },
     ]);
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(`${call.method} ${call.url}`).toBe('GET https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz');
     expect(call.headers['Accept-Encoding']).toBe('gzip');
     // The list is public: no session token goes out.

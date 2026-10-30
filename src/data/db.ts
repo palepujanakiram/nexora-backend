@@ -24,6 +24,9 @@ export interface Db extends Queryable {
   close(): Promise<void>;
 }
 
+/** A row as the driver returns it; repositories map it to typed records. */
+type Row = Record<string, unknown>;
+
 const INT8 = 20;
 const DATE = 1082;
 /** Counts and paise are int8 (every value fits a JS number); dates stay `YYYY-MM-DD` strings, free of time zones. */
@@ -41,15 +44,15 @@ export class PgDb implements Db {
   private readonly local = new LocalLocks();
 
   constructor(connectionString: string, max = 10, maxLocks = 10) {
-    const types = {
-      getTypeParser: (oid: number, format?: string) => PARSERS[oid] ?? pg.types.getTypeParser(oid, format as 'text'),
-    } as pg.CustomTypesConfig;
+    const types = new pg.TypeOverrides();
+    types.setTypeParser(pg.types.builtins.INT8, Number);
+    types.setTypeParser(pg.types.builtins.DATE, (v: string) => v);
     this.pool = new pg.Pool({ connectionString, max, types });
     this.lockPool = new pg.Pool({ connectionString, max: maxLocks, types });
   }
 
   async query<T>(sql: string, params: readonly unknown[] = []): Promise<T[]> {
-    return (await this.pool.query(sql, params as unknown[])).rows as T[];
+    return (await this.pool.query<Row>(sql, [...params])).rows as T[];
   }
 
   async exec(sql: string): Promise<void> {
@@ -61,8 +64,10 @@ export class PgDb implements Db {
     try {
       await client.query('BEGIN');
       const value = await fn({
-        query: async (sql, params = []) => (await client.query(sql, params as unknown[])).rows,
-        exec: async (sql) => void (await client.query(sql)),
+        query: async <R>(sql: string, params: readonly unknown[] = []) => (await client.query<Row>(sql, [...params])).rows as R[],
+        exec: async (sql: string) => {
+          await client.query(sql);
+        },
       });
       await client.query('COMMIT');
       return value;
@@ -81,8 +86,8 @@ export class PgDb implements Db {
       try {
         const deadline = Date.now() + waitMs;
         for (;;) {
-          const [row] = (await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [key])).rows as { ok: boolean }[];
-          if (row!.ok) break;
+          const { rows } = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [key]);
+          if (rows[0]?.ok === true) break;
           if (Date.now() >= deadline) return null;
           await new Promise((r) => setTimeout(r, 50));
         }
@@ -116,7 +121,7 @@ export class PgliteDb implements Db {
   }
 
   async query<T>(sql: string, params: readonly unknown[] = []): Promise<T[]> {
-    return (await this.pg.query<T>(sql, params as unknown[], { parsers: PARSERS })).rows;
+    return (await this.pg.query<T>(sql, [...params], { parsers: PARSERS })).rows;
   }
 
   async exec(sql: string): Promise<void> {
@@ -126,8 +131,10 @@ export class PgliteDb implements Db {
   async transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T> {
     return this.pg.transaction(async (tx) =>
       fn({
-        query: async (sql, params = []) => (await tx.query(sql, params as unknown[], { parsers: PARSERS })).rows as never,
-        exec: async (sql) => void (await tx.exec(sql)),
+        query: async <R>(sql: string, params: readonly unknown[] = []) => (await tx.query<R>(sql, [...params], { parsers: PARSERS })).rows,
+        exec: async (sql: string) => {
+          await tx.exec(sql);
+        },
       }),
     );
   }
@@ -149,10 +156,10 @@ export class LocalLocks {
     const previous = this.tails.get(key) ?? Promise.resolve();
     let release!: () => void;
     const mine = new Promise<void>((r) => (release = r));
-    const tail = previous.then(() => mine);
+    const tail = previous.then(async () => mine);
     this.tails.set(key, tail);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<'timeout'>((r) => (timer = setTimeout(() => r('timeout'), waitMs)));
+    const timedOut = new Promise<'timeout'>((r) => (timer = setTimeout(() => { r('timeout'); }, waitMs)));
     try {
       if ((await Promise.race([previous.then(() => 'ok' as const), timedOut])) === 'timeout') return null;
       return await fn();
@@ -189,13 +196,14 @@ export async function migrate(db: Db, migrations: readonly string[] = MIGRATIONS
   const result = await db.withLock('migrations', 60_000, async () => {
     const [row] = await db.query<{ v: number | null }>('SELECT max(version) AS v FROM schema_migrations');
     const current = row?.v ?? 0;
-    for (let v = current; v < migrations.length; v++) {
+    for (const [i, sql] of migrations.slice(current).entries()) {
       await db.transaction(async (tx) => {
-        await tx.exec(migrations[v]!);
-        await tx.query('INSERT INTO schema_migrations (version) VALUES ($1)', [v + 1]);
+        await tx.exec(sql);
+        await tx.query('INSERT INTO schema_migrations (version) VALUES ($1)', [current + i + 1]);
       });
     }
     return migrations.length - current;
   });
-  return result!.value;
+  if (!result) throw new Error('Another process held the migrations lock for 60 s; not starting.');
+  return result.value;
 }

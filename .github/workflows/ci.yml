@@ -23,6 +23,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # Type-aware lint: no any, no unchecked assertions, no non-null !.
+      - run: npm run lint
       - run: npm run build
       # Fails below 95% line coverage (vitest.config.ts thresholds).
       - run: npm run coverage

@@ -119,7 +119,7 @@ export class AnalyticsRepository {
   /** Execution quality from the rollups, grouped by broker (and optionally instrument and side). */
   async execution(q: { userId: string; from: string; to: string; byInstrument: boolean }): Promise<ExecutionRow[]> {
     const group = q.byInstrument ? 'broker, instrument_id, side' : 'broker';
-    const rows = await this.db.query<Record<string, unknown>>(
+    const rows = await this.db.query(
       `SELECT ${group}, sum(legs)::int8 AS legs, sum(filled)::int8 AS filled, sum(rejected)::int8 AS rejected,
               jsonb_agg(rejections) AS rejections, sum(slippage_bps_sum) AS slip, sum(slippage_samples)::int8 AS slip_n,
               sum(fill_ms_sum)::int8 AS fill_ms, sum(fill_samples)::int8 AS fill_n
@@ -130,7 +130,7 @@ export class AnalyticsRepository {
     );
     return rows.map((r) => {
       const rejections: Record<string, number> = {};
-      for (const part of r['rejections'] as Record<string, number>[]) {
+      for (const part of r['rejections'] as Record<string, unknown>[]) {
         for (const [code, n] of Object.entries(part)) rejections[code] = (rejections[code] ?? 0) + Number(n);
       }
       return {
@@ -151,7 +151,7 @@ export class AnalyticsRepository {
 
   /** Every fill for the user up to [to] (earlier fills set the cost basis), oldest first. */
   async fills(userId: string, to: string): Promise<PnlFact[]> {
-    const rows = await this.db.query<Record<string, unknown>>(
+    const rows = await this.db.query(
       `SELECT broker_account_id, instrument_id, side, filled_qty, avg_price_paise, terminal_at FROM analytics_leg_facts
         WHERE user_id = $1 AND filled_qty > 0 AND avg_price_paise IS NOT NULL AND day <= $2
         ORDER BY terminal_at, leg_id`,
@@ -181,7 +181,7 @@ export class AnalyticsRepository {
   }
 
   async snapshots(userId: string): Promise<{ accountId: string; tradingSymbol: string; netQty: number; pnlPaise: number | null; at: Date }[]> {
-    const rows = await this.db.query<Record<string, unknown>>(
+    const rows = await this.db.query(
       'SELECT * FROM analytics_position_snapshots WHERE user_id = $1 AND net_qty <> 0 ORDER BY broker_account_id, trading_symbol',
       [userId],
     );

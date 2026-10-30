@@ -4,7 +4,7 @@ import { BrokerError } from '../../src/domain/broker-error.ts';
 import { AppError } from '../../src/domain/errors.ts';
 import { EGRESS_IP_URL } from '../../src/http/routes/market.ts';
 import { admin, signIn, testApp } from '../app.ts';
-import { fakeFetch, json, text } from '../helpers.ts';
+import { fakeFetch, json, text, type ErrorBody } from '../helpers.ts';
 
 describe('health and routing', () => {
   it('reports health with version and flags', async () => {
@@ -97,8 +97,8 @@ describe('error handler', () => {
       payload: '{"phone":',
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('bad_request');
-    expect(res.json().error.message).toMatch(/JSON/i);
+    expect(res.json<ErrorBody>().error.code).toBe('bad_request');
+    expect(res.json<ErrorBody>().error.message).toMatch(/JSON/i);
   });
 
   it('hides unexpected errors behind a generic 500', async () => {
@@ -113,7 +113,7 @@ describe('error handler', () => {
 
   it('rate-limits sign-in routes with a 429', async () => {
     const { app } = await testApp({ env: { AUTH_RATE_LIMIT_PER_MINUTE: '2' } });
-    const ask = () => app.inject({ method: 'POST', url: '/auth/otp/request', payload: { phone: '9000000001' } });
+    const ask = async () => app.inject({ method: 'POST', url: '/auth/otp/request', payload: { phone: '9000000001' } });
     expect((await ask()).statusCode).toBe(200);
     expect((await ask()).statusCode).toBe(200);
     const res = await ask();

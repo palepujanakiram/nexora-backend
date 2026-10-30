@@ -6,7 +6,7 @@ import { hmacSha256 } from '../../src/data/crypto.ts';
 import { subscriptionStatus } from '../../src/usecases/billing.ts';
 import type { StreamEvent } from '../../src/usecases/events.ts';
 import { harness } from '../app.ts';
-import { fakeFetch, json, jsonOf, NOW } from '../helpers.ts';
+import { fakeFetch, json, jsonOf, NOW, defined } from '../helpers.ts';
 
 const WEBHOOK_SECRET = 'whsec_test';
 const BILLING_ENV = {
@@ -37,7 +37,7 @@ function razorpay() {
     if (state.mode === 'error') return json({ error: { code: 'BAD_REQUEST_ERROR', description: 'The plan id is invalid' } }, 400);
     if (state.mode === 'html') return new Response('<html>Bad gateway</html>', { status: 400 });
     const cancel = /\/subscriptions\/([^/]+)\/cancel$/.exec(url);
-    if (cancel) return json({ id: decodeURIComponent(cancel[1]!), status: 'active', current_end: 1_800_000_000 });
+    if (cancel) return json({ id: decodeURIComponent(defined(cancel[1])), status: 'active', current_end: 1_800_000_000 });
     return json({ id: `sub_rp_${++state.seq}`, status: 'created', short_url: `https://rzp.io/i/${state.seq}` });
   });
   return { state, fetch };
@@ -110,7 +110,7 @@ describe('checkout', () => {
     const w = await world();
     const r = await w.s.billing.checkout(w.user.id, 'pro');
     expect(r).toMatchObject({ checkoutUrl: 'https://rzp.io/i/1', status: 'created' });
-    const call = w.fetch.calls[0]!;
+    const call = defined(w.fetch.calls[0]);
     expect(call.url).toBe('https://api.razorpay.com/v1/subscriptions');
     expect(call.headers['Authorization']).toBe(`Basic ${Buffer.from('rzp_test_key:rzp_test_secret').toString('base64')}`);
     expect(jsonOf(call)).toEqual({ plan_id: 'plan_rp_pro', total_count: 120, customer_notify: 1, notes: { user_id: w.user.id, plan_code: 'pro' } });
@@ -202,7 +202,7 @@ describe('webhook', () => {
     // Cached for 30 s, but the webhook dropped the cache.
     expect((await w.s.entitlements.check(w.user.id)).mode).toBe('full');
     expect(w.events).toEqual([{ type: 'entitlement', mode: 'full' }]);
-    const sub = (await w.repo.latestSubscription(w.user.id))!;
+    const sub = defined(await w.repo.latestSubscription(w.user.id));
     expect((await w.repo.paymentEvents(sub.id)).map((e) => e.type)).toEqual(['subscription.active']);
   });
 
@@ -211,7 +211,7 @@ describe('webhook', () => {
     await w.s.billing.checkout(w.user.id, 'pro');
     expect(await w.webhook('active', { eventId: 'evt_same', currentEnd: NOW.getTime() / 1000 + 86_400 })).toEqual({ processed: true });
     expect(await w.webhook('halted', { eventId: 'evt_same' })).toEqual({ processed: false });
-    expect((await w.repo.latestSubscription(w.user.id))!.status).toBe('active');
+    expect(defined(await w.repo.latestSubscription(w.user.id)).status).toBe('active');
     expect(w.events).toHaveLength(1);
   });
 
@@ -240,11 +240,11 @@ describe('webhook', () => {
     const w = await world();
     await w.s.billing.checkout(w.user.id, 'pro');
     await w.webhook('pending');
-    const grace = (await w.repo.latestSubscription(w.user.id))!.graceUntil;
+    const grace = defined(await w.repo.latestSubscription(w.user.id)).graceUntil;
     await w.webhook('cancelled');
     expect(await w.repo.latestSubscription(w.user.id)).toMatchObject({ status: 'cancelled', graceUntil: grace });
     await w.webhook('completed');
-    expect((await w.repo.latestSubscription(w.user.id))!.status).toBe('expired');
+    expect(defined(await w.repo.latestSubscription(w.user.id)).status).toBe('expired');
   });
 
   it('records events for unknown subscriptions or without one, without applying them', async () => {

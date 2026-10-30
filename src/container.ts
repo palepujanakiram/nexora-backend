@@ -16,6 +16,7 @@ import { InstrumentRepository } from './data/instruments.ts';
 import { OrderRepository } from './data/orders.ts';
 import { PositionRepository } from './data/positions.ts';
 import { SettingsRepository } from './data/settings.ts';
+import { must } from './domain/invariant.ts';
 import { toPaise } from './domain/money.ts';
 import { SignalParser } from './domain/signal-parser.ts';
 import { createLogger } from './logging.ts';
@@ -47,10 +48,10 @@ export interface Runtime {
 }
 
 export const realRuntime: Runtime = {
-  fetch: (input, init) => fetch(input, init),
+  fetch: async (input, init) => fetch(input, init),
   clock: () => new Date(),
-  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-  print: (line) => console.log(line),
+  sleep: async (ms) => new Promise((r) => setTimeout(r, ms)),
+  print: (line) => { console.log(line); },
 };
 
 export type Services = Awaited<ReturnType<typeof createServices>>;
@@ -68,7 +69,8 @@ export async function createServices(config: Config, runtime: Runtime = realRunt
   const log = logger;
   const db = opts.db ?? (await openDatabase(config.DATABASE_URL));
   const { clock } = runtime;
-  const box = SecretBox.fromConfig(config.ENCRYPTION_KEYS ?? config.ENCRYPTION_KEY!, config.ENCRYPTION_KEY_VERSION ?? null);
+  const keys = must(config.ENCRYPTION_KEYS ?? config.ENCRYPTION_KEY, 'an encryption key (config validation requires one)');
+  const box = SecretBox.fromConfig(keys, config.ENCRYPTION_KEY_VERSION ?? null);
   const events = new EventBus();
 
   const identityRepo = new IdentityRepository(db);
@@ -90,7 +92,13 @@ export async function createServices(config: Config, runtime: Runtime = realRunt
   });
   const channels: OtpChannel[] =
     config.OTP_PROVIDER === 'msg91'
-      ? [new Msg91Sms({ fetch: runtime.fetch, authKey: config.MSG91_AUTH_KEY!, templateId: config.MSG91_TEMPLATE_ID! })]
+      ? [
+          new Msg91Sms({
+            fetch: runtime.fetch,
+            authKey: must(config.MSG91_AUTH_KEY, 'MSG91_AUTH_KEY (config validation requires it)'),
+            templateId: must(config.MSG91_TEMPLATE_ID, 'MSG91_TEMPLATE_ID (config validation requires it)'),
+          }),
+        ]
       : [new ConsoleOtp(runtime.print)];
   const identity = new IdentityService({
     repo: identityRepo,
@@ -199,12 +207,12 @@ export async function createServices(config: Config, runtime: Runtime = realRunt
     clock,
     log,
     jobs: [
-      { name: 'reconcile', everyMs: config.RECONCILE_INTERVAL_SECONDS * 1000, run: () => reconciler.pollDue() },
-      { name: 'analytics', everyMs: 60_000, run: () => analytics.pipeline() },
-      { name: 'idempotency_purge', everyMs: 3_600_000, run: () => ordersRepo.purgeIdempotency(new Date(clock().getTime() - 86_400_000)) },
-      { name: 'sessions_refresh', dailyAt: [6, 5], run: () => brokerAccounts.refreshSessions() },
-      { name: 'instruments_refresh', dailyAt: [8, 15], run: () => instruments.refresh() },
-      { name: 'eod_reconcile', dailyAt: [16, 0], run: () => reconciler.endOfDay() },
+      { name: 'reconcile', everyMs: config.RECONCILE_INTERVAL_SECONDS * 1000, run: async () => reconciler.pollDue() },
+      { name: 'analytics', everyMs: 60_000, run: async () => analytics.pipeline() },
+      { name: 'idempotency_purge', everyMs: 3_600_000, run: async () => ordersRepo.purgeIdempotency(new Date(clock().getTime() - 86_400_000)) },
+      { name: 'sessions_refresh', dailyAt: [6, 5], run: async () => brokerAccounts.refreshSessions() },
+      { name: 'instruments_refresh', dailyAt: [8, 15], run: async () => instruments.refresh() },
+      { name: 'eod_reconcile', dailyAt: [16, 0], run: async () => reconciler.endOfDay() },
     ],
   });
 

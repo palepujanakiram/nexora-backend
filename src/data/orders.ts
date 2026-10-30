@@ -11,6 +11,7 @@ import {
 } from '../domain/order.ts';
 import type { AccountMode } from './broker-accounts.ts';
 import type { Db, Queryable } from './db.ts';
+import { single } from '../domain/invariant.ts';
 
 export type ParentKind = 'ENTRY' | 'EXIT';
 
@@ -211,8 +212,7 @@ export class OrderRepository {
    */
   async updateLeg(legId: string, patch: LegPatch, event: LegEvent, now: Date): Promise<Leg> {
     return this.db.transaction(async (tx) => {
-      const [row] = await tx.query('SELECT * FROM order_legs WHERE id = $1 FOR UPDATE', [legId]);
-      const before = toLeg(row!);
+      const before = toLeg(single(await tx.query('SELECT * FROM order_legs WHERE id = $1 FOR UPDATE', [legId]), `leg ${legId}`));
       const after: Leg = { ...before, ...patch, updatedAt: now };
       const becameTerminal = !isTerminal(before.status) && isTerminal(after.status);
       if (becameTerminal) {
@@ -229,8 +229,8 @@ export class OrderRepository {
       await tx.query(`UPDATE order_legs SET ${sets.join(', ')} WHERE id = $1`, values);
       await this.event(tx, { leg: before, from: before.status, to: after.status, event, at: now });
       if (becameTerminal) {
-        const [p] = await tx.query('SELECT * FROM parent_orders WHERE id = $1', [before.parentOrderId]);
-        await this.outbox(tx, toParent(p!), after, now);
+        const parent = toParent(single(await tx.query('SELECT * FROM parent_orders WHERE id = $1', [before.parentOrderId]), 'the leg\'s parent order'));
+        await this.outbox(tx, parent, after, now);
       }
       await this.refreshParent(tx, before.parentOrderId, now);
       return after;
@@ -308,12 +308,12 @@ export class OrderRepository {
 
   /** Broker orders (legs) the user's ENTRY orders sent since [since]. Exits don't count. */
   async entryLegsSince(userId: string, since: Date): Promise<number> {
-    const [row] = await this.db.query<{ n: number }>(
+    const rows = await this.db.query<{ n: number }>(
       `SELECT count(*) AS n FROM order_legs l JOIN parent_orders p ON p.id = l.parent_order_id
         WHERE p.user_id = $1 AND p.kind = 'ENTRY' AND p.created_at >= $2`,
       [userId, since],
     );
-    return row!.n;
+    return single(rows, 'a count').n;
   }
 
   async events(legId: string): Promise<OrderEvent[]> {
@@ -345,13 +345,14 @@ export class OrderRepository {
       [userId, key, operation, requestHash, now],
     );
     if (inserted.length > 0) return { state: 'new' };
-    const [row] = await this.db.query<{ operation: string; request_hash: string; status_code: number | null; response: unknown }>(
+    const rows = await this.db.query<{ operation: string; request_hash: string; status_code: number | null; response: unknown }>(
       'SELECT operation, request_hash, status_code, response FROM idempotency_keys WHERE user_id = $1 AND key = $2',
       [userId, key],
     );
-    if (row!.operation !== operation || row!.request_hash !== requestHash) return { state: 'mismatch', operation: row!.operation };
-    if (row!.status_code === null) return { state: 'in_progress' };
-    return { state: 'replay', statusCode: row!.status_code, response: row!.response };
+    const row = single(rows, 'the idempotency key that blocked the insert');
+    if (row.operation !== operation || row.request_hash !== requestHash) return { state: 'mismatch', operation: row.operation };
+    if (row.status_code === null) return { state: 'in_progress' };
+    return { state: 'replay', statusCode: row.status_code, response: row.response };
   }
 
   async finishIdempotent(userId: string, key: string, statusCode: number, response: unknown): Promise<void> {

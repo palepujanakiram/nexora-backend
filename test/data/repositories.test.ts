@@ -7,7 +7,7 @@ import { InstrumentRepository } from '../../src/data/instruments.ts';
 import { PositionRepository } from '../../src/data/positions.ts';
 import { SettingsRepository } from '../../src/data/settings.ts';
 import { testDb } from '../db.ts';
-import { NOW } from '../helpers.ts';
+import { NOW, defined } from '../helpers.ts';
 
 const later = (ms: number) => new Date(NOW.getTime() + ms);
 
@@ -125,7 +125,7 @@ describe('InstrumentRepository', () => {
     expect(await r.mapping('NFO:CE:NIFTY:2026-10-29:2450000', 'zerodha')).toEqual({ nativeId: '1', tradingSymbol: 'NIFTY26O2924500CE', exchange: 'NFO' });
     expect(await r.mapping('NFO:CE:NIFTY:2026-10-29:2450000', 'groww')).toBeNull();
     // The latest refresh's lot size wins.
-    expect((await r.find('NFO:CE:NIFTY:2026-10-29:2450000'))!.lotSize).toBe(65);
+    expect(defined(await r.find('NFO:CE:NIFTY:2026-10-29:2450000')).lotSize).toBe(65);
   });
 
   it('prunes only the broker\'s mappings not refreshed since the given time', async () => {

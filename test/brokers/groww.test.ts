@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { BrokerError } from '../../src/domain/broker-error.ts';
 import { GrowwAdapter, growwStatus, splitExchange, splitOrderId } from '../../src/brokers/groww/index.ts';
 import type { ModifyRequest, PlaceRequest } from '../../src/brokers/adapter.ts';
-import { clock, ctx, fakeFetch, json, jsonOf, NOW, text } from '../helpers.ts';
+import { clock, ctx, fakeFetch, json, jsonOf, NOW, text, defined } from '../helpers.ts';
 
 const groww = new GrowwAdapter({ clock });
 const SYMBOL = { nativeId: 'SENSEX26O2973100PE', tradingSymbol: 'SENSEX26O2973100PE', exchange: 'BSE:FNO' };
@@ -71,7 +71,7 @@ describe('GrowwAdapter auth', () => {
     const fetch = fakeFetch(() => json({ token: 'AT1' }));
     const tokens = await groww.completeLink(ctx(fetch), { params: {} });
     expect(tokens).toEqual({ accessToken: 'AT1', refreshToken: null, expiresAt: new Date('2026-10-28T00:30:00Z') });
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(`${call.method} ${call.url}`).toBe('POST https://api.groww.in/v1/token/api/access');
     expect(call.headers['Authorization']).toBe('Bearer key123');
     const timestamp = String(NOW.getTime() / 1000);
@@ -119,7 +119,7 @@ describe('GrowwAdapter orders', () => {
     const fetch = fakeFetch(() => ok({ groww_order_id: 'GLTFO123', order_status: 'OPEN', order_reference_id: 'NXabcdefgh12345678' }));
     const ack = await groww.placeOrder(ctx(fetch), place());
     expect(ack.brokerOrderId).toBe('FNO:GLTFO123');
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(`${call.method} ${call.url}`).toBe('POST https://api.groww.in/v1/order/create');
     expect(call.headers).toMatchObject({ Authorization: 'Bearer AT', Accept: 'application/json', 'X-API-VERSION': '1.0', 'Content-Type': 'application/json' });
     expect(jsonOf(call)).toEqual({
@@ -196,7 +196,7 @@ describe('GrowwAdapter orders', () => {
     expect(jsonOf(fetch.calls[0])).toEqual({ groww_order_id: 'GLTFO123', segment: 'FNO', quantity: 60, price: 430, order_type: 'LIMIT' });
     expect(jsonOf(fetch.calls[1])).toEqual({ groww_order_id: 'G2', segment: 'CASH', quantity: 60, price: 430, trigger_price: 425, order_type: 'SL' });
     expect(jsonOf(fetch.calls[2])).toEqual({ segment: 'FNO', groww_order_id: 'GLTFO123' });
-    expect(fetch.calls[2]!.headers['X-API-VERSION']).toBe('1.0');
+    expect(defined(fetch.calls[2]).headers['X-API-VERSION']).toBe('1.0');
     await groww.modifyOrder(ctx(fetch), modify({ orderType: 'MARKET', pricePaise: null }));
     expect(jsonOf(fetch.calls[3])).toMatchObject({ price: 0, order_type: 'MARKET' });
   });
@@ -222,7 +222,7 @@ describe('GrowwAdapter orders', () => {
       brokerOrderId: 'FNO:GLTFO123', status: 'PARTIALLY_FILLED', quantity: 40, filledQty: 20, avgPricePaise: 42005,
       pricePaise: 42100, triggerPaise: null, orderType: 'LIMIT', clientRef: 'NXabcdefgh12345678', message: null,
     });
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(`${call.method} ${call.url}`).toBe('GET https://api.groww.in/v1/order/detail/GLTFO123?segment=FNO');
     expect(call.headers['Authorization']).toBe('Bearer AT');
     await expect(groww.getOrder(ctx(fakeFetch(() => ok({}))), 'CASH:G9')).rejects.toThrow('no order CASH:G9');
@@ -312,8 +312,8 @@ describe('GrowwAdapter positions and instruments', () => {
       { exchange: 'NFO', type: 'FUT', underlying: 'NIFTY', expiry: '2026-10-29', strikePaise: null, lotSize: 75, tickPaise: 5, symbol: { nativeId: 'NIFTY26OCTFUT', tradingSymbol: 'NIFTY26OCTFUT', exchange: 'NSE:FNO' } },
       { exchange: 'BSE', type: 'EQ', underlying: 'TCS', expiry: null, strikePaise: null, lotSize: 1, tickPaise: 5, symbol: { nativeId: 'TCS', tradingSymbol: 'TCS', exchange: 'BSE:CASH' } },
     ]);
-    expect(`${fetch.calls[0]!.method} ${fetch.calls[0]!.url}`).toBe('GET https://growwapi-assets.groww.in/instruments/instrument.csv');
-    expect(fetch.calls[0]!.headers['Authorization']).toBeUndefined();
+    expect(`${defined(fetch.calls[0]).method} ${defined(fetch.calls[0]).url}`).toBe('GET https://growwapi-assets.groww.in/instruments/instrument.csv');
+    expect(defined(fetch.calls[0]).headers['Authorization']).toBeUndefined();
   });
 
   it('needs an http client for the instrument list, and reports download failures', async () => {

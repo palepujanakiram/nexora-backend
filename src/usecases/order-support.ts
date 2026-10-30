@@ -11,6 +11,7 @@ import type { BrokerGateway } from './gateway.ts';
 import { legView, type LegTracker, type LegView } from './legs.ts';
 import { brokerErrorOf, type Outcome } from './order-rules.ts';
 import type { RiskService } from './risk.ts';
+import { must } from '../domain/invariant.ts';
 
 export interface OrderDeps {
   db: Db;
@@ -91,7 +92,7 @@ export class OrderSupport {
 
   /** The order and its legs (only those in [outcomes], with their outcome, when given). */
   async result(parentId: string, outcomes?: Map<string, Outcome>): Promise<FanoutResult> {
-    const parent = (await this.d.orders.parent(parentId))!;
+    const parent = must(await this.d.orders.parent(parentId), `order ${parentId}`);
     const legs = await this.d.orders.legs(parentId);
     return {
       parentOrderId: parent.id,

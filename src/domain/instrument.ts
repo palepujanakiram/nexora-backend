@@ -41,4 +41,7 @@ export interface BrokerSymbol {
   exchange: string;
 }
 
+export const isExchange = (v: string): v is Exchange => (EXCHANGES as readonly string[]).includes(v);
+export const isInstrumentType = (v: string): v is InstrumentType => (INSTRUMENT_TYPES as readonly string[]).includes(v);
+
 export const isDerivative = (i: Pick<Instrument, 'type'>) => i.type !== 'EQ';

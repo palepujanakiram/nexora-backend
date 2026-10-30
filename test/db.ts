@@ -7,7 +7,7 @@ let template: Promise<PGlite> | null = null;
 const open: PgliteDb[] = [];
 
 /** One migrated database per worker; every test gets a clone of it. */
-function migratedTemplate(): Promise<PGlite> {
+async function migratedTemplate(): Promise<PGlite> {
   template ??= (async () => {
     const pg = await PGlite.create();
     await migrate(new PgliteDb(pg));

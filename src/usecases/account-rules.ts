@@ -1,11 +1,16 @@
 import type { BrokerAdapter, Credentials } from '../brokers/adapter.ts';
 import type { BrokerAccountRecord } from '../data/broker-accounts.ts';
 import type { SecretBox } from '../data/crypto.ts';
+import { z } from 'zod';
+
 import { badRequest } from '../domain/errors.ts';
 
 /** Pure rules for broker accounts: credentials from a form, the login state, and what clients see. */
 
 const STATE_TTL_MS = 15 * 60_000;
+
+/** What a login `state` carries once decrypted. */
+const LinkState = z.object({ accountId: z.string(), exp: z.number() });
 
 /**
  * The broker's credential fields from what the user typed. Paper accounts may
@@ -35,12 +40,15 @@ export function encodeState(box: SecretBox, accountId: string, now: Date): strin
 /** The account id in a login [state]. Throws 400 when it's missing, forged or expired. */
 export function decodeState(box: SecretBox, state: string | undefined, now: Date): string {
   if (!state) throw badRequest('The broker redirect carried no state.');
-  let parsed: { accountId: string; exp: number };
+  let json: unknown;
   try {
-    parsed = JSON.parse(box.decrypt(Buffer.from(state, 'base64url').toString('utf8')));
+    json = JSON.parse(box.decrypt(Buffer.from(state, 'base64url').toString('utf8')));
   } catch {
-    throw badRequest('This login link is invalid. Start again from the app.');
+    json = null;
   }
+  const result = LinkState.safeParse(json);
+  if (!result.success) throw badRequest('This login link is invalid. Start again from the app.');
+  const parsed = result.data;
   if (parsed.exp < now.getTime()) throw badRequest('This login link has expired. Start again from the app.');
   return parsed.accountId;
 }

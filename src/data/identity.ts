@@ -1,4 +1,5 @@
 import type { Db, Queryable } from './db.ts';
+import { single } from '../domain/invariant.ts';
 
 export interface User {
   id: string;
@@ -11,6 +12,7 @@ export interface User {
 
 export const CLIENT_PLATFORMS = ['web', 'ios', 'android', 'partner', 'other'] as const;
 export type ClientPlatform = (typeof CLIENT_PLATFORMS)[number];
+export const isClientPlatform = (v: string): v is ClientPlatform => (CLIENT_PLATFORMS as readonly string[]).includes(v);
 export const GRANT_TYPES = ['otp', 'refresh_token'] as const;
 export type GrantType = (typeof GRANT_TYPES)[number];
 
@@ -180,8 +182,7 @@ export class IdentityRepository {
         [oldHash],
       );
       if (!token) return null;
-      const [row] = await tx.query('SELECT * FROM sessions WHERE id = $1 FOR UPDATE', [token.session_id]);
-      const session = toSession(row!);
+      const session = toSession(single(await tx.query('SELECT * FROM sessions WHERE id = $1 FOR UPDATE', [token.session_id]), 'the token\'s session'));
       if (token.used_at) return 'reused';
       // Revoked or expired: returned unchanged for the caller to refuse.
       if (session.revokedAt || session.expiresAt <= now) return session;
@@ -233,8 +234,8 @@ export class IdentityRepository {
 
   /** Counts one try at the code and returns the new total. */
   async addOtpAttempt(id: string): Promise<number> {
-    const [row] = await this.db.query<{ attempts: number }>('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1 RETURNING attempts', [id]);
-    return row!.attempts;
+    const rows = await this.db.query<{ attempts: number }>('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1 RETURNING attempts', [id]);
+    return single(rows, 'the OTP row').attempts;
   }
 
   /** Marks the code used. False if it was already used (two verifies racing). */

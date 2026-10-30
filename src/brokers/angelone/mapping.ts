@@ -1,7 +1,8 @@
 import type { Exchange } from '../../domain/instrument.ts';
-import { brokerRupeesToPaise } from '../../domain/money.ts';
+import { brokerRupeesToPaise, positivePaise } from '../../domain/money.ts';
 import type { LegStatus, OrderType } from '../../domain/order.ts';
 import type { BrokerInstrument, BrokerOrder } from '../adapter.ts';
+import { textOf } from '../http.ts';
 import { mapStatus, type BrokerState } from '../status.ts';
 
 /** Turning SmartAPI payloads into the adapter contract's types. Pure functions, no I/O. */
@@ -31,9 +32,9 @@ export const angelStatus = (status: string, filled: number): LegStatus => mapSta
 
 /** Angel's expiry (`30OCT2026`) → `2026-10-30`, or null when it isn't one. */
 export function angelExpiry(expiry: string): string | null {
-  const m = /^(\d{2})([A-Z]{3})(\d{4})$/.exec(expiry.trim().toUpperCase());
-  const month = m ? MONTHS[m[2]!] : undefined;
-  return m && month ? `${m[3]}-${month}-${m[1]}` : null;
+  const [, day, mon, year] = /^(\d{2})([A-Z]{3})(\d{4})$/.exec(expiry.trim().toUpperCase()) ?? [];
+  const month = mon === undefined ? undefined : MONTHS[mon];
+  return day && month && year ? `${year}-${month}-${day}` : null;
 }
 
 /** A token string without a `Bearer ` prefix (TODO(verify): some SmartAPI answers include it), or ''. */
@@ -41,21 +42,22 @@ export function bare(value: unknown): string {
   return typeof value === 'string' ? value.replace(/^Bearer\s+/i, '').trim() : '';
 }
 
-const textOf = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
+/** A non-empty string field, or null. */
+const optionalText = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
 
 export function toOrder(r: Record<string, unknown>): BrokerOrder {
   const filled = Number(r['filledshares']) || 0;
   return {
-    brokerOrderId: String(r['orderid']),
-    status: angelStatus(String(r['orderstatus'] || r['status'] || ''), filled),
+    brokerOrderId: textOf(r['orderid']),
+    status: angelStatus(textOf(r['orderstatus']) || textOf(r['status']), filled),
     quantity: Number(r['quantity']) || 0,
     filledQty: filled,
     avgPricePaise: filled > 0 ? brokerRupeesToPaise(r['averageprice']) : null,
-    pricePaise: brokerRupeesToPaise(r['price']) || null,
-    triggerPaise: brokerRupeesToPaise(r['triggerprice']) || null,
-    orderType: ORDER_TYPE_BACK[String(r['ordertype'])] ?? null,
-    clientRef: textOf(r['ordertag']),
-    message: textOf(r['text']),
+    pricePaise: positivePaise(r['price']),
+    triggerPaise: positivePaise(r['triggerprice']),
+    orderType: ORDER_TYPE_BACK[textOf(r['ordertype'])] ?? null,
+    clientRef: optionalText(r['ordertag']),
+    message: optionalText(r['text']),
     raw: r,
   };
 }
@@ -70,20 +72,20 @@ interface ScripRow {
 }
 
 function scripRow(r: Record<string, unknown>): ScripRow {
-  const exch = String(r['exch_seg'] ?? '');
-  const symbolText = String(r['symbol'] ?? '');
+  const exch = textOf(r['exch_seg']);
+  const symbolText = textOf(r['symbol']);
   return {
     exch,
-    kind: String(r['instrumenttype'] ?? ''),
+    kind: textOf(r['instrumenttype']),
     symbolText,
     base: {
-      underlying: String(r['name'] ?? ''),
+      underlying: textOf(r['name']),
       lotSize: Number(r['lotsize']) || 1,
       // Angel's strike and tick_size are in paise already.
       tickPaise: Math.round(Number(r['tick_size'])) || 5,
-      symbol: { nativeId: String(r['token'] ?? ''), tradingSymbol: symbolText, exchange: exch },
+      symbol: { nativeId: textOf(r['token']), tradingSymbol: symbolText, exchange: exch },
     },
-    expiry: String(r['expiry'] ?? ''),
+    expiry: textOf(r['expiry']),
     strike: r['strike'],
   };
 }

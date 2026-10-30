@@ -1,4 +1,4 @@
-import { fakeFetch, json, type FakeFetch } from './helpers.ts';
+import { bodyText, defined, fakeFetch, json, type FakeFetch } from './helpers.ts';
 
 export type FillMode = 'open' | 'filled' | 'partial';
 
@@ -44,7 +44,7 @@ export class FakeKite {
     const key = /^token ([^:]+):/.exec(auth)?.[1] ?? '';
     const path = url.slice('https://api.kite.trade'.length);
     const method = init.method ?? 'GET';
-    const form = Object.fromEntries(new URLSearchParams(String(init.body ?? '')));
+    const form = Object.fromEntries(new URLSearchParams(bodyText(init)));
     if (method !== 'GET' && this.down.has(key)) return json({ status: 'error', error_type: 'NetworkException', message: 'down' }, 503);
 
     if (path === '/session/token') return json({ status: 'success', data: { access_token: `AT-${form['request_token']}` } });
@@ -62,13 +62,13 @@ export class FakeKite {
         average_price: filled ? Number(form['price'] ?? this.lastPrice) : 0,
         price: Number(form['price'] ?? 0),
         trigger_price: Number(form['trigger_price'] ?? 0),
-        order_type: form['order_type']!,
-        tag: form['tag']!,
+        order_type: defined(form['order_type'], 'order_type'),
+        tag: defined(form['tag'], 'tag'),
         status_message: null,
-        tradingsymbol: form['tradingsymbol']!,
-        exchange: form['exchange']!,
-        product: form['product']!,
-        transaction_type: form['transaction_type']!,
+        tradingsymbol: defined(form['tradingsymbol'], 'tradingsymbol'),
+        exchange: defined(form['exchange'], 'exchange'),
+        product: defined(form['product'], 'product'),
+        transaction_type: defined(form['transaction_type'], 'transaction_type'),
         instrument_token: '12345',
         key,
       });
@@ -76,20 +76,20 @@ export class FakeKite {
     }
     const one = /^\/orders\/regular\/(\w+)$/.exec(path);
     if (one) {
-      const o = this.orders.get(one[1]!);
-      if (!o || o.status !== 'OPEN') return json({ status: 'error', error_type: 'InputException', message: 'Order cannot be modified or cancelled.' }, 400);
+      const o = this.orders.get(defined(one[1]));
+      if (o?.status !== 'OPEN') return json({ status: 'error', error_type: 'InputException', message: 'Order cannot be modified or cancelled.' }, 400);
       if (method === 'DELETE') o.status = 'CANCELLED';
       if (method === 'PUT') {
         o.quantity = Number(form['quantity']);
         o.price = Number(form['price'] ?? 0);
         o.trigger_price = Number(form['trigger_price'] ?? 0);
-        o.order_type = form['order_type']!;
+        o.order_type = defined(form['order_type'], 'order_type');
       }
       return json({ status: 'success', data: { order_id: o.order_id } });
     }
     const history = /^\/orders\/(\w+)$/.exec(path);
     if (history) {
-      const o = this.orders.get(history[1]!);
+      const o = this.orders.get(defined(history[1]));
       return o ? json({ status: 'success', data: [{ ...o }] }) : json({ status: 'error', error_type: 'InputException', message: 'No order' }, 400);
     }
     if (path === '/orders') return json({ status: 'success', data: [...this.orders.values()].filter((o) => o.key === key) });
@@ -122,7 +122,7 @@ export class FakeKite {
 
   /** Fills an open order at [price], as the exchange would. */
   fillOrder(id: string, price: number) {
-    const o = this.orders.get(id)!;
+    const o = defined(this.orders.get(id), `order ${id}`);
     o.filled_quantity = o.quantity;
     o.average_price = price;
     o.status = 'COMPLETE';
@@ -145,7 +145,7 @@ export class FakeUpstox {
       return o ? json({ status: 'success', data: o }) : json({ status: 'error', errors: [{ message: 'not found' }] }, 404);
     }
     if (url.includes('/v3/order/place')) {
-      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const body = JSON.parse(bodyText(init)) as Record<string, unknown>;
       const id = `UP${this.book.length + 1}`;
       this.book.push({ order_id: id, status: 'open', quantity: body['quantity'], filled_quantity: 0, price: body['price'], tag: body['tag'], order_type: body['order_type'] });
       return json({ status: 'success', data: { order_ids: [id] } });

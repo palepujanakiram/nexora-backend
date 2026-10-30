@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { BrokerError } from '../../src/domain/broker-error.ts';
 import { BrokerHttp, extractParam, objectOf, parseCsv, redact, redactUrl, splitCsv, type Fetch } from '../../src/brokers/http.ts';
-import { fakeFetch, json, memoryLog, noNetwork, text } from '../helpers.ts';
+import { fakeFetch, json, memoryLog, noNetwork, text, defined, noop } from '../helpers.ts';
 
 function client(fetch: Fetch, overrides: { dryRun?: boolean; timeoutMs?: number; acquire?: () => Promise<void> } = {}) {
   const log = memoryLog();
@@ -61,16 +61,16 @@ describe('BrokerHttp.send', () => {
     const fetch = fakeFetch(() => json({}));
     const { http } = client(fetch);
     await http.send({ kind: 'write', method: 'PUT', url: 'https://api.test/orders/1', form: { price: '420.05', checksum: 'c' } });
-    expect(fetch.calls[0]!.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
-    expect(fetch.calls[0]!.body).toBe('price=420.05&checksum=c');
+    expect(defined(fetch.calls[0]).headers['Content-Type']).toBe('application/x-www-form-urlencoded');
+    expect(defined(fetch.calls[0]).body).toBe('price=420.05&checksum=c');
   });
 
   it('sends no body for GETs and returns non-JSON text as is', async () => {
     const fetch = fakeFetch(() => text('<html>not found</html>', 404));
     const { http } = client(fetch);
     const res = await http.send({ kind: 'read', method: 'GET', url: 'https://api.test/x' });
-    expect(fetch.calls[0]!.body).toBeUndefined();
-    expect(fetch.calls[0]!.headers['Content-Type']).toBeUndefined();
+    expect(defined(fetch.calls[0]).body).toBeUndefined();
+    expect(defined(fetch.calls[0]).headers['Content-Type']).toBeUndefined();
     expect(res).toMatchObject({ status: 404, body: null, text: '<html>not found</html>' });
     expect(res.raw.request.body).toBeNull();
     expect(res.raw.response).toEqual({ status: 404, body: '<html>not found</html>' });
@@ -121,9 +121,9 @@ describe('BrokerHttp.send', () => {
 
   it('times out even when fetch ignores the abort signal', async () => {
     let signal: AbortSignal | undefined;
-    const fetch = fakeFetch((_url, init) => {
+    const fetch = fakeFetch(async (_url, init) => {
       signal = init.signal ?? undefined;
-      return new Promise<Response>(() => {});
+      return new Promise<Response>(noop);
     });
     const { http } = client(fetch, { timeoutMs: 20 });
     const e = await brokerError(http.send({ kind: 'write', method: 'POST', url: 'https://api.test/orders', json: { a: 1 } }));
@@ -135,7 +135,7 @@ describe('BrokerHttp.send', () => {
   });
 
   it('times out when the body never arrives', async () => {
-    const fetch = fakeFetch(() => ({ status: 200, arrayBuffer: () => new Promise<string>(() => {}) }) as unknown as Response);
+    const fetch = fakeFetch(() => ({ status: 200, arrayBuffer: async () => new Promise<string>(noop) }) as unknown as Response);
     const { http } = client(fetch, { timeoutMs: 20 });
     expect((await brokerError(http.send({ kind: 'read', method: 'GET', url: 'https://api.test/' }))).code).toBe('TIMEOUT');
   });

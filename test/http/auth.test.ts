@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { PHONE, admin, signIn, testApp } from '../app.ts';
+import { defined, anyString, stringMatching, type ErrorBody } from '../helpers.ts';
 
 async function newClient(app: Awaited<ReturnType<typeof testApp>>['app']) {
   const res = await app.inject({ method: 'POST', url: '/admin/clients', headers: admin, payload: { name: 'Android app', platform: 'android' } });
-  return res.json().id as string;
+  return res.json<{ id: string }>().id;
 }
 
 describe('POST /auth/otp/request', () => {
@@ -30,7 +31,7 @@ describe('POST /auth/otp/request', () => {
     const t = await testApp();
     const res = await t.app.inject({ method: 'POST', url: '/auth/otp/request', payload: {} });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toMatchObject({ code: 'bad_request', message: expect.stringMatching(/^phone: /) });
+    expect(res.json<ErrorBody>().error).toMatchObject({ code: 'bad_request', message: stringMatching(/^phone: /) });
   });
 });
 
@@ -42,7 +43,7 @@ describe('POST /auth/otp/verify', () => {
     expect(me.refreshToken).toBeTruthy();
     const profile = await t.app.inject({ method: 'GET', url: '/me', headers: me.headers });
     expect(profile.statusCode).toBe(200);
-    expect(profile.json()).toEqual({ id: me.userId, phone: '+919876543210', email: null, createdAt: expect.any(String) });
+    expect(profile.json()).toEqual({ id: me.userId, phone: '+919876543210', email: null, createdAt: anyString() });
   });
 
   it('refuses a wrong code with the tries left', async () => {
@@ -62,7 +63,7 @@ describe('POST /auth/otp/verify', () => {
     await t.app.inject({ method: 'POST', url: '/auth/otp/request', payload: { phone: PHONE } });
     const res = await t.app.inject({ method: 'POST', url: '/auth/otp/verify', payload: { phone: PHONE, code: t.otps[0], clientId: 'cl_nope' } });
     expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe('unauthorized');
+    expect(res.json<ErrorBody>().error.code).toBe('unauthorized');
   });
 });
 
@@ -72,18 +73,18 @@ describe('POST /auth/refresh', () => {
     const me = await signIn(t);
     const first = await t.app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken: me.refreshToken, clientId: me.clientId } });
     expect(first.statusCode).toBe(200);
-    const rotated = first.json();
+    const rotated = first.json<{ accessToken: string; refreshToken: string }>();
     expect(rotated.refreshToken).not.toBe(me.refreshToken);
     const fresh = { authorization: `Bearer ${rotated.accessToken}` };
     expect((await t.app.inject({ method: 'GET', url: '/me', headers: fresh })).statusCode).toBe(200);
 
     const reused = await t.app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken: me.refreshToken, clientId: me.clientId } });
     expect(reused.statusCode).toBe(401);
-    expect(reused.json().error.code).toBe('refresh_reused');
+    expect(reused.json<ErrorBody>().error.code).toBe('refresh_reused');
 
     const after = await t.app.inject({ method: 'GET', url: '/me', headers: fresh });
     expect(after.statusCode).toBe(401);
-    expect(after.json().error.code).toBe('unauthorized');
+    expect(after.json<ErrorBody>().error.code).toBe('unauthorized');
   });
 
   it('refuses an unknown refresh token', async () => {
@@ -103,11 +104,11 @@ describe('sessions', () => {
     const tablet = await signIn(t);
     const list = await t.app.inject({ method: 'GET', url: '/auth/sessions', headers: phone.headers });
     expect(list.statusCode).toBe(200);
-    const sessions = list.json().sessions as { id: string; current: boolean; device: string; clientId: string }[];
+    const { sessions } = list.json<{ sessions: { id: string; current: boolean; device: string; clientId: string }[] }>();
     expect(sessions).toHaveLength(2);
     expect(sessions.filter((s) => s.current)).toHaveLength(1);
-    expect(sessions[0]).toMatchObject({ device: 'iPhone', ip: '127.0.0.1', createdAt: expect.any(String), lastUsedAt: expect.any(String), expiresAt: expect.any(String) });
-    const other = sessions.find((s) => !s.current)!;
+    expect(sessions[0]).toMatchObject({ device: 'iPhone', ip: '127.0.0.1', createdAt: anyString(), lastUsedAt: anyString(), expiresAt: anyString() });
+    const other = defined(sessions.find((s) => !s.current));
     expect(other.clientId).toBe(tablet.clientId);
 
     const revoked = await t.app.inject({ method: 'DELETE', url: `/auth/sessions/${other.id}`, headers: phone.headers });
@@ -136,7 +137,7 @@ describe('sessions', () => {
     expect(basic.statusCode).toBe(401);
     const junk = await t.app.inject({ method: 'GET', url: '/me', headers: { authorization: 'Bearer not.a.jwt' } });
     expect(junk.statusCode).toBe(401);
-    expect(junk.json().error.code).toBe('unauthorized');
+    expect(junk.json<ErrorBody>().error.code).toBe('unauthorized');
   });
 });
 
@@ -146,8 +147,8 @@ describe('GET /.well-known/jwks.json', () => {
     const res = await t.app.inject({ method: 'GET', url: '/.well-known/jwks.json' });
     expect(res.statusCode).toBe(200);
     expect(res.headers['cache-control']).toBe('public, max-age=300');
-    const { keys } = res.json();
-    expect(keys[0]).toMatchObject({ kty: 'OKP', crv: 'Ed25519', kid: 'k1', x: expect.any(String) });
+    const { keys } = res.json<{ keys: Record<string, unknown>[] }>();
+    expect(keys[0]).toMatchObject({ kty: 'OKP', crv: 'Ed25519', kid: 'k1', x: anyString() });
     expect(JSON.stringify(keys)).not.toContain('"d"');
   });
 });

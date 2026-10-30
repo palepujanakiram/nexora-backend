@@ -33,7 +33,7 @@ export class PositionRepository {
 
   async list(accountIds: readonly string[]): Promise<StoredPosition[]> {
     if (accountIds.length === 0) return [];
-    const rows = await this.db.query<Record<string, unknown>>(
+    const rows = await this.db.query(
       'SELECT * FROM positions WHERE broker_account_id = ANY($1) ORDER BY broker_account_id, trading_symbol',
       [accountIds],
     );

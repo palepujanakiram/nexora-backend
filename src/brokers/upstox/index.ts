@@ -1,7 +1,7 @@
 import { BrokerError, classifyMessage, type BrokerErrorCode } from '../../domain/broker-error.ts';
 import type { Exchange, InstrumentType } from '../../domain/instrument.ts';
 import { istDate, nextIstTime } from '../../domain/ist.ts';
-import { brokerRupeesToPaise, rupeeNumber } from '../../domain/money.ts';
+import { brokerRupeesToPaise, rupeeNumber, positivePaise } from '../../domain/money.ts';
 import type { LegStatus, OrderType, Product } from '../../domain/order.ts';
 import {
   standardModifyProblem,
@@ -22,7 +22,7 @@ import {
   type WebhookHint,
 } from '../adapter.ts';
 import { mapStatus, type BrokerState } from '../status.ts';
-import { extractParam, objectOf, type HttpRequest, type HttpResult } from '../http.ts';
+import { extractParam, objectOf, type HttpRequest, type HttpResult, textOf } from '../http.ts';
 
 export const UPSTOX_BASE = 'https://api.upstox.com';
 export const UPSTOX_HFT = 'https://api-hft.upstox.com';
@@ -140,22 +140,22 @@ export class UpstoxAdapter implements BrokerAdapter {
     const out: BrokerInstrument[] = [];
     for (const row of res.body) {
       const r = objectOf(row);
-      const exchange = SEGMENT[String(r['segment'])];
-      const type = String(r['instrument_type']);
+      const exchange = SEGMENT[textOf(r['segment'])];
+      const type = textOf(r['instrument_type']);
       if (!exchange || !TYPES.has(type)) continue;
       const derivative = type !== 'EQ';
-      const tradingSymbol = String(r['trading_symbol']);
+      const tradingSymbol = textOf(r['trading_symbol']);
       const expiryMs = Number(r['expiry']);
       out.push({
         exchange,
         type: type as InstrumentType,
-        underlying: derivative ? String(r['underlying_symbol'] ?? r['name']) : tradingSymbol,
+        underlying: derivative ? textOf(r['underlying_symbol'] ?? r['name']) : tradingSymbol,
         expiry: derivative && expiryMs > 0 ? istDate(new Date(expiryMs)) : null,
         strikePaise: type === 'CE' || type === 'PE' ? brokerRupeesToPaise(r['strike_price']) : null,
         lotSize: Number(r['lot_size']) || 1,
         // Upstox's tick_size is in paise (5 means ₹0.05), unlike Kite's rupees. Checked against the live file, 30 Oct 2026.
         tickPaise: Math.round(Number(r['tick_size'])) || 5,
-        symbol: { nativeId: String(r['instrument_key']), tradingSymbol, exchange: String(r['segment']) },
+        symbol: { nativeId: textOf(r['instrument_key']), tradingSymbol, exchange: textOf(r['segment']) },
       });
     }
     return out;
@@ -236,13 +236,13 @@ export class UpstoxAdapter implements BrokerAdapter {
     const data = this.data(res, 'read');
     return (Array.isArray(data) ? data : []).map((p) => {
       const r = objectOf(p);
-      const key = String(r['instrument_token']);
+      const key = textOf(r['instrument_token']);
       // The instrument key is `<segment>|<id>`; the segment is the exchange code our symbols carry.
-      const segment = key.split('|')[0]!;
+      const [segment = ''] = key.split('|');
       return {
         // TODO(verify): positions name the field `trading_symbol`; older payloads used `tradingsymbol`.
-        symbol: { nativeId: key, tradingSymbol: String(r['trading_symbol'] ?? r['tradingsymbol']), exchange: segment },
-        product: positionProduct(String(r['product']), segment),
+        symbol: { nativeId: key, tradingSymbol: textOf(r['trading_symbol'] ?? r['tradingsymbol']), exchange: segment },
+        product: positionProduct(textOf(r['product']), segment),
         netQty: Number(r['quantity']) || 0,
         avgPricePaise: brokerRupeesToPaise(r['average_price']),
         lastPricePaise: brokerRupeesToPaise(r['last_price']),
@@ -262,7 +262,7 @@ export class UpstoxAdapter implements BrokerAdapter {
     return { brokerOrderId: orderId, verify: null };
   }
 
-  private send(ctx: AccountContext, req: HttpRequest): Promise<HttpResult> {
+  private async send(ctx: AccountContext, req: HttpRequest): Promise<HttpResult> {
     return ctx.http.send({ ...req, headers: { Authorization: `Bearer ${ctx.token?.accessToken ?? ''}`, Accept: 'application/json', ...req.headers } });
   }
 
@@ -270,7 +270,7 @@ export class UpstoxAdapter implements BrokerAdapter {
     if (id === undefined || id === null || id === '') {
       throw new BrokerError('UNKNOWN', 'Upstox accepted the request but returned no order id.', res.raw);
     }
-    return { brokerOrderId: String(id), raw: res.raw };
+    return { brokerOrderId: textOf(id), raw: res.raw };
   }
 
   private data(res: HttpResult, kind: HttpRequest['kind']): unknown {
@@ -283,7 +283,7 @@ export class UpstoxAdapter implements BrokerAdapter {
     const body = objectOf(res.body);
     const first = objectOf(Array.isArray(body['errors']) ? body['errors'][0] : undefined);
     const message = typeof first['message'] === 'string' ? first['message'] : `HTTP ${res.status}`;
-    const errorCode = String(first['errorCode'] ?? first['error_code'] ?? '');
+    const errorCode = textOf(first['errorCode']) || textOf(first['error_code']);
     let code: BrokerErrorCode;
     if (res.status === 401 || INVALID_TOKEN_CODES.has(errorCode)) code = 'AUTH_EXPIRED';
     else code = classifyMessage(message) ?? (kind === 'write' && res.status === 400 ? 'REJECTED_BY_EXCHANGE' : 'UNKNOWN');
@@ -307,14 +307,14 @@ function positionProduct(product: string, segment: string): Product {
 function toOrder(r: Record<string, unknown>): BrokerOrder {
   const filled = Number(r['filled_quantity']) || 0;
   return {
-    brokerOrderId: String(r['order_id']),
-    status: upstoxStatus(String(r['status'] ?? ''), filled),
+    brokerOrderId: textOf(r['order_id']),
+    status: upstoxStatus(textOf(r['status']), filled),
     quantity: Number(r['quantity']) || 0,
     filledQty: filled,
     avgPricePaise: filled > 0 ? brokerRupeesToPaise(r['average_price']) : null,
-    pricePaise: brokerRupeesToPaise(r['price']) || null,
-    triggerPaise: brokerRupeesToPaise(r['trigger_price']) || null,
-    orderType: ORDER_TYPE_BACK[String(r['order_type'])] ?? null,
+    pricePaise: positivePaise(r['price']),
+    triggerPaise: positivePaise(r['trigger_price']),
+    orderType: ORDER_TYPE_BACK[textOf(r['order_type'])] ?? null,
     clientRef: typeof r['tag'] === 'string' && r['tag'] ? r['tag'] : null,
     message: typeof r['status_message'] === 'string' && r['status_message'] ? r['status_message'] : null,
     raw: r,

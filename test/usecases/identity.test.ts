@@ -7,7 +7,7 @@ import { DEFAULT_OTP_POLICY, IdentityService } from '../../src/usecases/identity
 import { TokenSigner } from '../../src/usecases/tokens.ts';
 import { JWT_PRIVATE_KEY, harness, testClock } from '../app.ts';
 import { testDb } from '../db.ts';
-import { memoryLog } from '../helpers.ts';
+import { memoryLog, defined, objectContaining } from '../helpers.ts';
 
 const PHONE = '9876543210';
 const IP = '203.0.113.7';
@@ -25,7 +25,7 @@ async function world() {
   });
   const login = async (phone = PHONE, clientId = client.id) => {
     await s.identity.requestOtp({ phone, ip: IP });
-    return s.identity.verifyOtp({ phone, code: h.otps.at(-1)!, clientId, device: 'iPhone 17', ip: IP });
+    return s.identity.verifyOtp({ phone, code: defined(h.otps.at(-1)), clientId, device: 'iPhone 17', ip: IP });
   };
   return { ...h, s, user, client, login };
 }
@@ -56,7 +56,7 @@ describe('OTP request', () => {
     expect(w.otps).toHaveLength(0);
     // The unknown number's attempt is recorded but can never be verified.
     const [row] = await w.s.db.query<{ code_hash: string }>(`SELECT code_hash FROM otp_codes WHERE phone = '919123456780'`);
-    expect(row!.code_hash).toBe('none');
+    expect(defined(row).code_hash).toBe('none');
   });
 
   it('allows three codes per number per hour, then 429 with retry_after_seconds', async () => {
@@ -80,7 +80,7 @@ describe('OTP request', () => {
     for (let i = 0; i < 20; i++) await w.s.identity.requestOtp({ phone: `91234567${String(i).padStart(2, '0')}`, ip: IP });
     const e = await rejects(w.s.identity.requestOtp({ phone: PHONE, ip: IP }));
     expect(e).toMatchObject({ status: 429, message: 'Too many codes from this network. Try again later.' });
-    expect(e.details!['retry_after_seconds']).toBe(3600);
+    expect(defined(e.details)['retry_after_seconds']).toBe(3600);
   });
 
   it('deletes codes older than a day', async () => {
@@ -122,14 +122,14 @@ describe('OTP verify', () => {
     const w = await world();
     await w.s.identity.requestOtp({ phone: PHONE, ip: IP });
     w.clock.advance(5 * 60_000);
-    const e = await rejects(w.s.identity.verifyOtp({ phone: PHONE, code: w.otps[0]!, clientId: w.client.id, device: 'x', ip: IP }));
+    const e = await rejects(w.s.identity.verifyOtp({ phone: PHONE, code: defined(w.otps[0]), clientId: w.client.id, device: 'x', ip: IP }));
     expect(e).toMatchObject({ status: 401, code: 'otp_expired', message: 'This code has expired. Ask for a new one.' });
   });
 
   it('counts wrong guesses and locks the code after five', async () => {
     const w = await world();
     await w.s.identity.requestOtp({ phone: PHONE, ip: IP });
-    const right = w.otps[0]!;
+    const right = defined(w.otps[0]);
     const wrong = right === '000000' ? '111111' : '000000';
     const messages: string[] = [];
     for (let i = 0; i < 5; i++) {
@@ -151,17 +151,17 @@ describe('OTP verify', () => {
   it('uses a code once', async () => {
     const w = await world();
     await w.login();
-    const e = await rejects(w.s.identity.verifyOtp({ phone: PHONE, code: w.otps[0]!, clientId: w.client.id, device: 'x', ip: IP }));
+    const e = await rejects(w.s.identity.verifyOtp({ phone: PHONE, code: defined(w.otps[0]), clientId: w.client.id, device: 'x', ip: IP }));
     expect(e).toMatchObject({ status: 401, code: 'otp_expired' });
   });
 
   it('refuses when the code is used concurrently', async () => {
     const w = await world();
     await w.s.identity.requestOtp({ phone: PHONE, ip: IP });
-    const input = { phone: PHONE, code: w.otps[0]!, clientId: w.client.id, device: 'x', ip: IP };
+    const input = { phone: PHONE, code: defined(w.otps[0]), clientId: w.client.id, device: 'x', ip: IP };
     const results = await Promise.allSettled([w.s.identity.verifyOtp(input), w.s.identity.verifyOtp(input)]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    const failed = defined(results.find((r) => r.status === 'rejected'));
     expect(failed.reason).toMatchObject({ status: 401, code: 'otp_expired' });
   });
 
@@ -169,7 +169,7 @@ describe('OTP verify', () => {
     const w = await world();
     await w.s.identity.requestOtp({ phone: PHONE, ip: IP });
     await w.s.db.query(`UPDATE users SET status = 'disabled'`);
-    const e = await rejects(w.s.identity.verifyOtp({ phone: PHONE, code: w.otps[0]!, clientId: w.client.id, device: 'x', ip: IP }));
+    const e = await rejects(w.s.identity.verifyOtp({ phone: PHONE, code: defined(w.otps[0]), clientId: w.client.id, device: 'x', ip: IP }));
     expect(e).toMatchObject({ status: 401, code: 'unauthorized', message: 'This account is not active.' });
   });
 
@@ -202,7 +202,7 @@ describe('refresh tokens', () => {
     const e = await rejects(w.s.identity.refresh({ refreshToken: first.refreshToken, clientId: w.client.id }));
     expect(e).toMatchObject({ status: 401, code: 'refresh_reused' });
     const [row] = await w.s.db.query<{ revoked_reason: string }>('SELECT revoked_reason FROM sessions WHERE id = $1', [first.sessionId]);
-    expect(row!.revoked_reason).toBe('refresh_token_reused');
+    expect(defined(row).revoked_reason).toBe('refresh_token_reused');
     // Every token of that session stops working.
     await expect(w.s.identity.authenticate(second.accessToken)).rejects.toMatchObject({ status: 401, message: 'Your session has ended. Sign in again.' });
     await expect(w.s.identity.refresh({ refreshToken: second.refreshToken, clientId: w.client.id })).rejects.toMatchObject({
@@ -261,7 +261,7 @@ describe('sessions', () => {
     await expect(w.s.identity.revoke(w.user.id, a.sessionId)).rejects.toMatchObject({ status: 404 });
     expect((await w.s.identity.sessions(w.user.id)).map((s) => s.id)).toEqual([b.sessionId]);
     const [row] = await w.s.db.query<{ revoked_reason: string }>('SELECT revoked_reason FROM sessions WHERE id = $1', [a.sessionId]);
-    expect(row!.revoked_reason).toBe('revoked_by_user');
+    expect(defined(row).revoked_reason).toBe('revoked_by_user');
   });
 
   it('refuses a token whose user was disabled, or whose session belongs to someone else', async () => {
@@ -327,7 +327,7 @@ describe('OTP delivery', () => {
     await service.requestOtp({ phone: PHONE, ip: IP });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatch(/^console:\d{6}$/);
-    expect(log.lines).toContainEqual(expect.objectContaining({ level: 'warn', msg: 'otp channel failed; trying the next', obj: expect.objectContaining({ op: 'sms', reason: 'sms is down' }) }));
+    expect(log.lines).toContainEqual(expect.objectContaining({ level: 'warn', msg: 'otp channel failed; trying the next', obj: objectContaining({ op: 'sms', reason: 'sms is down' }) }));
   });
 
   it('throws the last failure when every channel fails', async () => {

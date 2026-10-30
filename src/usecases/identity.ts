@@ -7,6 +7,7 @@ import { AppError, badRequest, conflict, forbidden, tooManyRequests, unauthorize
 import { normalizeIndianMobile } from '../domain/phone.ts';
 import type { Log } from '../logging.ts';
 import type { AccessClaims, TokenSigner } from './tokens.ts';
+import { must } from '../domain/invariant.ts';
 
 export interface OtpPolicy {
   length: number;
@@ -110,7 +111,7 @@ export class IdentityService {
     }
     if (!(await repo.useOtp(otp.id, now))) throw new AppError(401, 'otp_expired', 'This code was already used. Ask for a new one.');
     const user = await repo.userByPhone(phone);
-    if (!user || user.status !== 'active') throw unauthorized('This account is not active.');
+    if (user?.status !== 'active') throw unauthorized('This account is not active.');
     const session: Session = {
       id: newId('ses'),
       userId: user.id,
@@ -140,8 +141,9 @@ export class IdentityService {
     const result = await repo.rotateRefresh(oldHash, sha256(next), now, () => new Date(now.getTime() + client.refreshTtlSeconds * 1000));
     if (result === null) throw unauthorized('Unknown refresh token. Sign in again.');
     if (result === 'reused') {
-      await repo.revokeSession(owner!.id, now, 'refresh_token_reused');
-      this.d.log.warn({ userId: owner!.userId, sessionId: owner!.id, event: 'refresh_reuse' }, 'refresh token reused; session revoked');
+      const reused = must(owner, 'the session of a spent refresh token');
+      await repo.revokeSession(reused.id, now, 'refresh_token_reused');
+      this.d.log.warn({ userId: reused.userId, sessionId: reused.id, event: 'refresh_reuse' }, 'refresh token reused; session revoked');
       throw new AppError(401, 'refresh_reused', 'This sign-in was used from somewhere else and has been ended. Sign in again.');
     }
     if (result.revokedAt || result.expiresAt <= now) throw unauthorized('Your session has ended. Sign in again.');
@@ -154,7 +156,7 @@ export class IdentityService {
     const session = await this.d.repo.session(claims.sid);
     if (!session || session.revokedAt || session.userId !== claims.sub) throw unauthorized('Your session has ended. Sign in again.');
     const user = await this.d.repo.user(claims.sub);
-    if (!user || user.status !== 'active') throw unauthorized('This account is not active.');
+    if (user?.status !== 'active') throw unauthorized('This account is not active.');
     return { user, sessionId: session.id, clientId: claims.aud };
   }
 
@@ -168,7 +170,7 @@ export class IdentityService {
 
   async revoke(userId: string, sessionId: string): Promise<void> {
     const session = await this.d.repo.session(sessionId);
-    if (!session || session.userId !== userId || session.revokedAt) throw new AppError(404, 'not_found', 'No such active session.');
+    if (session?.userId !== userId || session.revokedAt) throw new AppError(404, 'not_found', 'No such active session.');
     await this.d.repo.revokeSession(sessionId, this.d.clock(), 'revoked_by_user');
   }
 
@@ -176,7 +178,8 @@ export class IdentityService {
 
   async registerUser(input: { phone: string; email?: string | null | undefined }): Promise<User> {
     const phone = normalizeIndianMobile(input.phone);
-    const email = input.email?.trim().toLowerCase() || null;
+    const typed = input.email?.trim().toLowerCase();
+    const email = typed === undefined || typed === '' ? null : typed;
     if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest('Enter a valid email address.');
     if (await this.d.repo.userByPhone(phone)) throw conflict('A user with this mobile number already exists.');
     if (email && (await this.d.repo.userByEmail(email))) throw conflict('A user with this email already exists.');
@@ -225,12 +228,14 @@ export class IdentityService {
         this.d.log.warn({ userId: user.id, op: channel.name, reason: (e as Error).message }, 'otp channel failed; trying the next');
       }
     }
-    throw last ?? new AppError(503, 'otp_unavailable', 'Sign-in codes can\'t be sent right now.');
+    if (last instanceof Error) throw last;
+    throw new AppError(503, 'otp_unavailable', 'Sign-in codes can\'t be sent right now.');
   }
 }
 
 function limit(times: Date[], max: number, now: Date, message: string) {
   if (times.length < max) return;
-  const retry = times[0]!.getTime() + HOUR - now.getTime();
+  const oldest = times[0] ?? now;
+  const retry = oldest.getTime() + HOUR - now.getTime();
   throw tooManyRequests(message, Math.max(1, Math.ceil(retry / 1000)));
 }

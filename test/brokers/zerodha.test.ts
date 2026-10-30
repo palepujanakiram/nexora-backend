@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { BrokerError } from '../../src/domain/broker-error.ts';
 import { ZerodhaAdapter, kiteStatus } from '../../src/brokers/zerodha/index.ts';
 import type { PlaceRequest } from '../../src/brokers/adapter.ts';
-import { clock, ctx, fakeFetch, formOf, json, text } from '../helpers.ts';
+import { clock, ctx, fakeFetch, formOf, json, text, defined } from '../helpers.ts';
 
 const kite = new ZerodhaAdapter({ clock });
 const SYMBOL = { nativeId: '12345', tradingSymbol: 'SENSEX26O2973100PE', exchange: 'BFO' };
@@ -50,7 +50,7 @@ describe('ZerodhaAdapter auth', () => {
     const fetch = fakeFetch(() => ok({ access_token: 'AT1' }));
     const tokens = await kite.completeLink(ctx(fetch), { params: { url: 'https://x/cb?request_token=RT&status=success' } });
     expect(tokens).toEqual({ accessToken: 'AT1', refreshToken: null, expiresAt: new Date('2026-10-28T00:30:00Z') });
-    expect(fetch.calls[0]!.url).toBe('https://api.kite.trade/session/token');
+    expect(defined(fetch.calls[0]).url).toBe('https://api.kite.trade/session/token');
     expect(formOf(fetch.calls[0])).toEqual({
       api_key: 'key123',
       request_token: 'RT',
@@ -73,7 +73,7 @@ describe('ZerodhaAdapter orders', () => {
     const fetch = fakeFetch(() => ok({ order_id: '2501' }));
     const ack = await kite.placeOrder(ctx(fetch), place({ orderType: 'SL', triggerPaise: 41000 }));
     expect(ack.brokerOrderId).toBe('2501');
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(call.url).toBe('https://api.kite.trade/orders/regular');
     expect(call.headers['Authorization']).toBe('token key123:AT');
     expect(formOf(call)).toEqual({
@@ -188,7 +188,7 @@ describe('ZerodhaAdapter positions, instruments and postbacks', () => {
     expect(await kite.getPositions(ctx(fetch))).toEqual([
       { symbol: SYMBOL, product: 'CARRYFORWARD', netQty: -20, avgPricePaise: 40000, lastPricePaise: 41050, pnlPaise: -21000 },
     ]);
-    expect(fetch.calls[0]!.url).toBe('https://api.kite.trade/portfolio/positions');
+    expect(defined(fetch.calls[0]).url).toBe('https://api.kite.trade/portfolio/positions');
     const odd = fakeFetch(() => ok({ net: [{ instrument_token: 1, tradingsymbol: 'X', exchange: 'NSE', product: 'BO' }] }));
     expect((await kite.getPositions(ctx(odd)))[0]).toMatchObject({ product: 'CARRYFORWARD', netQty: 0 });
     expect(await kite.getPositions(ctx(fakeFetch(() => ok({}))))).toEqual([]);
@@ -209,7 +209,7 @@ describe('ZerodhaAdapter positions, instruments and postbacks', () => {
       { exchange: 'NSE', type: 'EQ', underlying: 'RELIANCE', expiry: null, strikePaise: null, lotSize: 1, tickPaise: 10, symbol: { nativeId: '738561', tradingSymbol: 'RELIANCE', exchange: 'NSE' } },
       { exchange: 'NFO', type: 'FUT', underlying: 'NIFTY', expiry: '2026-10-29', strikePaise: null, lotSize: 75, tickPaise: 5, symbol: { nativeId: '10', tradingSymbol: 'NIFTY26OCTFUT', exchange: 'NFO' } },
     ]);
-    expect(fetch.calls[0]!.headers['Authorization']).toBe('token key123:AT');
+    expect(defined(fetch.calls[0]).headers['Authorization']).toBe('token key123:AT');
   });
 
   it('needs a session for the instrument dump', async () => {
@@ -221,11 +221,11 @@ describe('ZerodhaAdapter positions, instruments and postbacks', () => {
   it('verifies postback checksums with the API secret', () => {
     const body = { order_id: '2501', order_timestamp: '2026-10-27 09:30:01', status: 'COMPLETE' };
     const checksum = createHash('sha256').update('25012026-10-27 09:30:01secret456').digest('hex');
-    const hint = kite.parseWebhook({ ...body, checksum })!;
+    const hint = defined(kite.parseWebhook({ ...body, checksum }));
     expect(hint.brokerOrderId).toBe('2501');
-    expect(hint.verify!({ apiKey: 'k', apiSecret: 'secret456', extra: {} })).toBe(true);
-    expect(hint.verify!({ apiKey: 'k', apiSecret: 'other', extra: {} })).toBe(false);
-    expect(kite.parseWebhook({ ...body, checksum: 'short' })!.verify!({ apiKey: 'k', apiSecret: 'secret456', extra: {} })).toBe(false);
+    expect(defined(hint.verify)({ apiKey: 'k', apiSecret: 'secret456', extra: {} })).toBe(true);
+    expect(defined(hint.verify)({ apiKey: 'k', apiSecret: 'other', extra: {} })).toBe(false);
+    expect(defined(defined(kite.parseWebhook({ ...body, checksum: 'short' })).verify)({ apiKey: 'k', apiSecret: 'secret456', extra: {} })).toBe(false);
     expect(kite.parseWebhook({ order_id: 1 })).toBeNull();
   });
 });

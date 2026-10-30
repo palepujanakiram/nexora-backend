@@ -16,6 +16,15 @@ Node.js + TypeScript server for NexoraApp. It fans one order out to many broker 
 - Schema changes: append a migration to `src/data/schema.ts`; never edit an applied one.
 - TypeScript runs directly on Node 24 (type stripping): use only erasable syntax (no `enum`, no parameter properties, no namespaces) and import with `.ts` extensions.
 
+## Strict typing
+
+The compiler runs in `strict` mode plus `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noPropertyAccessFromIndexSignature` and the unused/unreachable checks (`tsconfig.json`). On top of that, `npm run lint` runs typescript-eslint's `strict-type-checked` rules, and CI fails on any finding.
+
+- No `any`, written or inferred. Untyped input (JSON, broker payloads, database rows) is `unknown` until it's checked: parse it with a zod schema, or read fields with `textOf` / `objectOf` / `positivePaise`.
+- No non-null `!`. Use a narrowing check, or `must(value, what)` / `single(rows, what)` from `src/domain/invariant.ts` for values the code itself guarantees (a row it just wrote, a regex group that matched).
+- No `as` to change a type you haven't checked. Use a type guard (`isExchange`, `isInstrumentType`, `isClientPlatform`) instead. The one sanctioned assertion is where `Db.query<T>` types its rows.
+- No `eslint-disable`, `@ts-ignore` or `@ts-expect-error`. Every function that returns a promise is `async`, so errors always arrive as rejections.
+
 ## Code coverage is mandatory
 
 Every change comes with tests. **Line coverage of `src/` must stay at or above 95%**, and CI fails below that.
@@ -41,6 +50,7 @@ Every change comes with tests. **Line coverage of `src/` must stay at or above 9
 ```bash
 npm install
 npm run typecheck     # must report no errors
+npm run lint          # strict type-aware lint, must report nothing
 npm run coverage      # all tests + 95% coverage gate
 npm run build         # compile to dist/
 ```

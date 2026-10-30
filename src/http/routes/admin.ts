@@ -62,11 +62,11 @@ export const adminRoutes =
     });
 
     const JOBS: Record<string, () => Promise<unknown>> = {
-      reconcile: () => s.reconciler.pollDue(),
-      eod_reconcile: () => s.reconciler.endOfDay(),
-      analytics: () => s.analytics.pipeline(),
-      sessions_refresh: () => s.brokerAccounts.refreshSessions(),
-      reencrypt: () => s.brokerAccounts.reencrypt(),
+      reconcile: async () => s.reconciler.pollDue(),
+      eod_reconcile: async () => s.reconciler.endOfDay(),
+      analytics: async () => s.analytics.pipeline(),
+      sessions_refresh: async () => s.brokerAccounts.refreshSessions(),
+      reencrypt: async () => s.brokerAccounts.reencrypt(),
     };
 
     /** Runs a background job now (e.g. end-of-day reconciliation, re-encryption after a key rotation). */

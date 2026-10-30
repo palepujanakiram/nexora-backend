@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { EventBus, type StreamEvent } from '../../src/usecases/events.ts';
+import { noop } from '../helpers.ts';
 
 const event: StreamEvent = { type: 'entitlement', mode: 'full' };
 
@@ -27,7 +28,7 @@ describe('EventBus', () => {
       throw new Error('socket closed');
     });
     bus.subscribe('usr_1', (e) => got.push(e));
-    expect(() => bus.publish('usr_1', event)).not.toThrow();
+    expect(() => { bus.publish('usr_1', event); }).not.toThrow();
     expect(got).toEqual([event]);
   });
 
@@ -35,7 +36,7 @@ describe('EventBus', () => {
     const bus = new EventBus();
     const got: StreamEvent[] = [];
     const off1 = bus.subscribe('usr_1', (e) => got.push(e));
-    const off2 = bus.subscribe('usr_1', () => {});
+    const off2 = bus.subscribe('usr_1', noop);
     off1();
     expect(bus.listenerCount('usr_1')).toBe(1);
     off2();

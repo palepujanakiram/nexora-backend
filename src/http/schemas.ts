@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { CLIENT_PLATFORMS, GRANT_TYPES } from '../data/identity.ts';
 import { AppError, badRequest } from '../domain/errors.ts';
+import { must } from '../domain/invariant.ts';
 import { toPaise } from '../domain/money.ts';
 import { ORDER_TYPES, PRODUCTS, SIDES } from '../domain/order.ts';
 
@@ -10,7 +11,7 @@ const price = z.union([z.string().max(20), z.number()]).transform((v, ctx) => {
   try {
     return toPaise(v);
   } catch (e) {
-    ctx.addIssue({ code: 'custom', message: (e as AppError).message });
+    ctx.addIssue({ code: 'custom', message: e instanceof AppError ? e.message : 'Not a price.' });
     return z.NEVER;
   }
 });
@@ -82,7 +83,7 @@ export const ModifyOrderBody = z.object({
 export const SubsetBody = z.object({ accountIds: accountSubset });
 export const ListOrdersQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  before: z.string().datetime().optional(),
+  before: z.iso.datetime().optional(),
 });
 
 export const InstrumentQuery = z.object({
@@ -104,7 +105,7 @@ export const AnalyticsQuery = z.object({
 export function parse<T extends z.ZodType>(schema: T, value: unknown): z.output<T> {
   const result = schema.safeParse(value ?? {});
   if (result.success) return result.data;
-  const issue = result.error.issues[0]!;
+  const issue = must(result.error.issues[0], 'a validation issue on a failed parse');
   const where = issue.path.length ? `${issue.path.join('.')}: ` : '';
   throw badRequest(`${where}${issue.message}`);
 }

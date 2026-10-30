@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Runtime } from '../src/container.ts';
 import { closeOnSignals, main, start } from '../src/server.ts';
 import { JWT_PRIVATE_KEY, testClock } from './app.ts';
-import { TEST_KEY, noNetwork } from './helpers.ts';
+import { TEST_KEY, noNetwork, defined, asyncNoop, noop } from './helpers.ts';
 
 const ENV = {
   PORT: '0',
@@ -17,7 +17,7 @@ const ENV = {
   LOG_LEVEL: 'silent',
 };
 
-const runtime = (): Runtime => ({ fetch: noNetwork(), clock: testClock(), sleep: async () => {}, print: () => {} });
+const runtime = (): Runtime => ({ fetch: noNetwork(), clock: testClock(), sleep: asyncNoop, print: noop });
 
 const started: FastifyInstance[] = [];
 afterEach(async () => {
@@ -59,19 +59,19 @@ describe('closeOnSignals', () => {
     const signals: NodeJS.Signals[] = ['SIGUSR2', 'SIGWINCH'];
     const before = signals.map((s) => process.listenerCount(s));
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
-    const close = vi.fn(async () => {});
+    const close = vi.fn(asyncNoop);
     const listeners = signals.map((s) => process.listeners(s));
     closeOnSignals({ close } as unknown as FastifyInstance, signals);
     try {
       expect(signals.map((s) => process.listenerCount(s))).toEqual(before.map((n) => n + 1));
       process.emit('SIGUSR2');
-      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+      await vi.waitFor(() => { expect(exit).toHaveBeenCalledWith(0); });
       expect(close).toHaveBeenCalledTimes(1);
       // `once`: the SIGUSR2 listener removed itself.
       expect(process.listenerCount('SIGUSR2')).toBe(before[0]);
     } finally {
       signals.forEach((s, i) => {
-        for (const l of process.listeners(s)) if (!listeners[i]!.includes(l)) process.removeListener(s, l);
+        for (const l of process.listeners(s)) if (!defined(listeners[i]).includes(l)) process.removeListener(s, l);
       });
     }
     expect(signals.map((s) => process.listenerCount(s))).toEqual(before);
@@ -80,12 +80,12 @@ describe('closeOnSignals', () => {
   it('defaults to SIGINT and SIGTERM', () => {
     const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
     const listeners = signals.map((s) => process.listeners(s));
-    closeOnSignals({ close: async () => {} } as unknown as FastifyInstance);
+    closeOnSignals({ close: asyncNoop } as unknown as FastifyInstance);
     try {
       expect(signals.map((s) => process.listenerCount(s))).toEqual(listeners.map((l) => l.length + 1));
     } finally {
       signals.forEach((s, i) => {
-        for (const l of process.listeners(s)) if (!listeners[i]!.includes(l)) process.removeListener(s, l);
+        for (const l of process.listeners(s)) if (!defined(listeners[i]).includes(l)) process.removeListener(s, l);
       });
     }
   });
@@ -99,7 +99,7 @@ describe('main', () => {
     expect((await health(app)).status).toBe(200);
     expect(process.listenerCount('SIGTERM')).toBe(before + 1);
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-      const listener = process.listeners(signal).at(-1)!;
+      const listener = defined(process.listeners(signal).at(-1));
       process.removeListener(signal, listener);
     }
   });

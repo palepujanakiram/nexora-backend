@@ -18,7 +18,7 @@ import {
   type PlaceRequest,
   type TokenSet,
 } from '../adapter.ts';
-import { objectOf, type CallKind, type HttpRequest, type HttpResult } from '../http.ts';
+import { objectOf, type CallKind, type HttpRequest, type HttpResult, textOf } from '../http.ts';
 import { bare, toInstrument, toOrder } from './mapping.ts';
 
 export { angelExpiry, angelStatus } from './mapping.ts';
@@ -202,8 +202,8 @@ export class AngelOneAdapter implements BrokerAdapter {
     return (Array.isArray(data) ? data : []).map((p) => {
       const r = objectOf(p);
       return {
-        symbol: { nativeId: String(r['symboltoken']), tradingSymbol: String(r['tradingsymbol']), exchange: String(r['exchange']) },
-        product: PRODUCT_BACK[String(r['producttype'])] ?? 'CARRYFORWARD',
+        symbol: { nativeId: textOf(r['symboltoken']), tradingSymbol: textOf(r['tradingsymbol']), exchange: textOf(r['exchange']) },
+        product: PRODUCT_BACK[textOf(r['producttype'])] ?? 'CARRYFORWARD',
         netQty: Number(r['netqty']) || 0,
         // TODO(verify): `avgnetprice` vs `netprice` as the average price of the net position.
         avgPricePaise: brokerRupeesToPaise(r['avgnetprice']),
@@ -246,7 +246,7 @@ export class AngelOneAdapter implements BrokerAdapter {
     if (id === undefined || id === null || id === '') {
       throw new BrokerError('UNKNOWN', 'Angel One accepted the request but returned no order id.', res.raw);
     }
-    return { brokerOrderId: String(id), raw: res.raw };
+    return { brokerOrderId: textOf(id), raw: res.raw };
   }
 
   private async call(ctx: AccountContext, req: HttpRequest, authed = true): Promise<unknown> {

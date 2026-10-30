@@ -61,7 +61,7 @@ export class Scheduler {
     if (istMinutes(now) < h * 60 + m) return null;
     if ((await this.d.settings.jobState<{ day: string }>(job.name))?.day === today) return null;
     if (now.getTime() - this.sinceLastRun(job) < 10 * 60_000) return null;
-    return { after: () => this.d.settings.setJobState(job.name, { day: today }, this.d.clock()) };
+    return { after: async () => this.d.settings.setJobState(job.name, { day: today }, this.d.clock()) };
   }
 
   private sinceLastRun(job: Job): number {
@@ -73,7 +73,9 @@ export class Scheduler {
     this.timer = setInterval(() => {
       if (this.ticking) return;
       this.ticking = this.runDue()
-        .catch((e: Error) => this.d.log.error({ job: 'scheduler', reason: e.message }, 'scheduler tick failed'))
+        .catch((e: unknown) => {
+          this.d.log.error({ job: 'scheduler', reason: e instanceof Error ? e.message : 'unknown error' }, 'scheduler tick failed');
+        })
         .then(() => {
           this.ticking = null;
         });

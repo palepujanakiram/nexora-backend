@@ -20,7 +20,7 @@ import {
   type PlaceRequest,
   type TokenSet,
 } from '../adapter.ts';
-import { objectOf, parseCsv, type HttpRequest, type HttpResult } from '../http.ts';
+import { objectOf, parseCsv, type HttpRequest, type HttpResult, textOf } from '../http.ts';
 import { SEGMENTS, splitExchange, splitOrderId, toInstrument, toOrder, type Segment } from './mapping.ts';
 
 export { SEGMENTS, growwStatus, splitExchange, splitOrderId } from './mapping.ts';
@@ -185,10 +185,10 @@ export class GrowwAdapter implements BrokerAdapter {
       for (const p of Array.isArray(positions) ? positions : []) {
         // TODO(verify): field names of Groww's position rows (trading_symbol, exchange, segment, product, quantity, net_price).
         const r = objectOf(p);
-        const tradingSymbol = String(r['trading_symbol']);
+        const tradingSymbol = textOf(r['trading_symbol']);
         out.push({
-          symbol: { nativeId: tradingSymbol, tradingSymbol, exchange: `${String(r['exchange'])}:${String(r['segment'] ?? segment)}` },
-          product: PRODUCT_BACK[String(r['product'])] ?? 'CARRYFORWARD',
+          symbol: { nativeId: tradingSymbol, tradingSymbol, exchange: `${textOf(r['exchange'])}:${textOf(r['segment'], segment)}` },
+          product: PRODUCT_BACK[textOf(r['product'])] ?? 'CARRYFORWARD',
           netQty: Number(r['quantity']) || 0,
           avgPricePaise: brokerRupeesToPaise(r['net_price']),
           // TODO(verify): Groww's positions response carries no LTP or P&L that we know of; both stay null.
@@ -207,11 +207,11 @@ export class GrowwAdapter implements BrokerAdapter {
   private async ack(ctx: AccountContext, req: HttpRequest, segment: Segment, knownId: string | null): Promise<BrokerAck> {
     const res = await ctx.http.send({ ...req, headers: this.headers(ctx) });
     const payload = objectOf(this.payload(res, req.kind));
-    const id = payload['groww_order_id'] ?? knownId;
-    if (id === undefined || id === null || id === '') {
+    const id = textOf(payload['groww_order_id']) || (knownId ?? '');
+    if (id === '') {
       throw new BrokerError('UNKNOWN', 'Groww accepted the request but returned no order id.', res.raw);
     }
-    return { brokerOrderId: `${segment}:${String(id)}`, raw: res.raw };
+    return { brokerOrderId: `${segment}:${id}`, raw: res.raw };
   }
 
   private async call(ctx: AccountContext, req: HttpRequest): Promise<unknown> {

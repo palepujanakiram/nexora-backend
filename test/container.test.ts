@@ -11,7 +11,7 @@ import { AppError } from '../src/domain/errors.ts';
 import { createLogger } from '../src/logging.ts';
 import { JWT_PRIVATE_KEY, testClock } from './app.ts';
 import { testDb } from './db.ts';
-import { TEST_KEY, fakeFetch, json, noNetwork, type FakeFetch } from './helpers.ts';
+import { TEST_KEY, fakeFetch, json, noNetwork, type FakeFetch, defined, asyncNoop, noop } from './helpers.ts';
 
 const BASE = { DATABASE_URL: 'pglite:memory', ENCRYPTION_KEYS: `1:${TEST_KEY}`, JWT_PRIVATE_KEY, LOG_LEVEL: 'silent' };
 
@@ -22,14 +22,14 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-const runtime = (fetch: FakeFetch = noNetwork()): Runtime => ({ fetch, clock: testClock(), sleep: async () => {}, print: () => {} });
+const runtime = (fetch: FakeFetch = noNetwork()): Runtime => ({ fetch, clock: testClock(), sleep: asyncNoop, print: noop });
 
 describe('openDatabase', () => {
   it('opens a migrated in-memory PGlite', async () => {
     const db = await openDatabase('pglite:memory');
     opened.push(db);
     const [row] = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM schema_migrations');
-    expect(row!.n).toBeGreaterThan(0);
+    expect(defined(row).n).toBeGreaterThan(0);
     expect(await db.query('SELECT * FROM paper_orders')).toEqual([]);
   });
 
@@ -80,11 +80,11 @@ describe('createServices', () => {
     await s.identity.registerUser({ phone: '9876543210' });
     await s.identity.requestOtp({ phone: '9876543210', ip: '1.2.3.4' });
     expect(fetch.calls).toHaveLength(1);
-    const url = new URL(fetch.calls[0]!.url);
+    const url = new URL(defined(fetch.calls[0]).url);
     expect(url.pathname).toBe('/api/v5/otp');
     expect(url.searchParams.get('template_id')).toBe('TPL');
     expect(url.searchParams.get('otp')).toMatch(/^\d{4}$/);
-    expect(fetch.calls[0]!.headers['authkey']).toBe('AUTH');
+    expect(defined(fetch.calls[0]).headers['authkey']).toBe('AUTH');
     // Razorpay is wired: a webhook is checked against the secret instead of refused as unconfigured.
     const e = await s.billing.webhook('{}', 'bad-signature', 'evt_1').catch((err: unknown) => err);
     expect(e).toBeInstanceOf(AppError);

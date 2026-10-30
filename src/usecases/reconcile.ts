@@ -8,6 +8,7 @@ import { lastIstTime } from '../domain/ist.ts';
 import type { Log } from '../logging.ts';
 import type { BrokerGateway } from './gateway.ts';
 import type { LegTracker } from './legs.ts';
+import { must } from '../domain/invariant.ts';
 
 export interface ReconcileDeps {
   db: Db;
@@ -47,7 +48,7 @@ export class Reconciler {
   /** Re-reads every leg that's due. Returns how many were looked at. */
   async pollDue(limit = 50): Promise<number> {
     const due = await this.d.orders.dueForReconcile(this.d.clock(), limit);
-    await Promise.all(due.map((leg) => this.refreshUnderLock(leg, 'reconcile')));
+    await Promise.all(due.map(async (leg) => this.refreshUnderLock(leg, 'reconcile')));
     return due.length;
   }
 
@@ -101,7 +102,7 @@ export class Reconciler {
       return this.issue(null, accountId, null, 'order_book_unavailable', `Couldn't read the order book: ${(e as Error).message}`);
     }
     const byId = new Map(book.map((o) => [o.brokerOrderId, o]));
-    const byRef = new Map(book.filter((o) => o.clientRef).map((o) => [o.clientRef!, o]));
+    const byRef = new Map(book.flatMap((o) => (o.clientRef ? [[o.clientRef, o] as const] : [])));
     let issues = 0;
     for (const leg of legs) {
       const bo = (leg.brokerOrderId ? byId.get(leg.brokerOrderId) : undefined) ?? byRef.get(leg.clientRef);
@@ -125,13 +126,13 @@ export class Reconciler {
     const issues = isTerminal(leg.status)
       ? await this.issue(leg.id, accountId, bo.brokerOrderId, 'status_mismatch', `We had ${leg.status} (${leg.filledQty} filled); the broker says ${bo.status} (${bo.filledQty} filled).`)
       : 0;
-    const parent = (await this.d.orders.parent(leg.parentOrderId))!;
+    const parent = must(await this.d.orders.parent(leg.parentOrderId), `order ${leg.parentOrderId}`);
     await this.d.legs.apply(leg, bo, 'eod', parent.userId);
     return issues;
   }
 
   async openIssues(): Promise<ReconciliationIssue[]> {
-    const rows = await this.d.db.query<Record<string, unknown>>('SELECT * FROM reconciliation_issues WHERE resolved_at IS NULL ORDER BY id');
+    const rows = await this.d.db.query('SELECT * FROM reconciliation_issues WHERE resolved_at IS NULL ORDER BY id');
     return rows.map((r) => ({
       id: Number(r['id']),
       legId: (r['leg_id'] as string | null) ?? null,
@@ -164,8 +165,8 @@ export class Reconciler {
   /** Re-reads [leg] while holding its order's lock, so it can't race a cancel or exit. Skips if busy. */
   private async refreshUnderLock(leg: Leg, source: 'reconcile' | 'webhook'): Promise<void> {
     await this.d.db.withLock(`order:${leg.parentOrderId}`, 0, async () => {
-      const current = (await this.d.orders.leg(leg.id))!;
-      const parent = (await this.d.orders.parent(current.parentOrderId))!;
+      const current = must(await this.d.orders.leg(leg.id), `leg ${leg.id}`);
+      const parent = must(await this.d.orders.parent(current.parentOrderId), `order ${current.parentOrderId}`);
       await this.d.legs.refresh(current, source, parent.userId);
     });
   }

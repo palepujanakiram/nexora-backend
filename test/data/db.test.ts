@@ -5,13 +5,14 @@ import { describe, expect, it } from 'vitest';
 import { LocalLocks, PgDb, PgliteDb, migrate, openDb, openPglite } from '../../src/data/db.ts';
 import { MIGRATIONS } from '../../src/data/schema.ts';
 import { testDb } from '../db.ts';
+import { defined } from '../helpers.ts';
 
 describe('migrations', () => {
   it('applies every migration once and records it', async () => {
     const db = await testDb();
     expect(await migrate(db)).toBe(0);
     const [row] = await db.query<{ v: number }>('SELECT max(version) AS v FROM schema_migrations');
-    expect(row!.v).toBe(MIGRATIONS.length);
+    expect(defined(row).v).toBe(MIGRATIONS.length);
   });
 
   it('rolls back a failing migration', async () => {
@@ -82,7 +83,7 @@ describe('LocalLocks', () => {
   it('gives up after the wait and returns null', async () => {
     const locks = new LocalLocks();
     let release!: () => void;
-    const held = locks.run('k', 1000, () => new Promise<number>((r) => (release = () => r(1))));
+    const held = locks.run('k', 1000, async () => new Promise<number>((r) => (release = () => { r(1); })));
     expect(await locks.run('k', 10, async () => 2)).toBeNull();
     release();
     expect(await held).toBe(1);
@@ -129,7 +130,7 @@ describe('PgDb (the production driver) over the Postgres wire protocol', () => {
     const port = Number(new URL(`tcp://${server.getServerConn()}`).port);
     const db = await openDb(`postgres://postgres@127.0.0.1:${port}/postgres`);
     try {
-      expect((await db.query<{ v: number }>('SELECT max(version) AS v FROM schema_migrations'))[0]!.v).toBe(MIGRATIONS.length);
+      expect(defined((await db.query<{ v: number }>('SELECT max(version) AS v FROM schema_migrations'))[0]).v).toBe(MIGRATIONS.length);
     } finally {
       await db.close();
       await server.stop();

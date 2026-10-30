@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { InstrumentRepository } from '../../src/data/instruments.ts';
 import { admin, signIn, testApp } from '../app.ts';
-import { NOW, fakeFetch, json } from '../helpers.ts';
+import { NOW, fakeFetch, json, defined, anyString, type ErrorBody } from '../helpers.ts';
 
 const WEBHOOK_SECRET = 'whsec-test';
 const BILLING = { BILLING_ENABLED: 'true', RAZORPAY_KEY_ID: 'rzp_test_key', RAZORPAY_KEY_SECRET: 'rzp_test_secret', RAZORPAY_WEBHOOK_SECRET: WEBHOOK_SECRET };
@@ -29,7 +29,7 @@ async function world(opts: { billing?: boolean } = {}) {
   const base = { exchange: 'NFO' as const, type: 'CE' as const, underlying: 'NIFTY', expiry: '2026-10-29', strikePaise: 2450000, lotSize: 75, tickPaise: 5 };
   await new InstrumentRepository(t.services.db).upsertFromBroker('zerodha', [{ ...base, symbol: { nativeId: '12345', tradingSymbol: 'X', exchange: 'NFO' } }], NOW);
   const me = await signIn(t);
-  const webhook = (payload: unknown, eventId: string | null, secret = WEBHOOK_SECRET) => {
+  const webhook = async (payload: unknown, eventId: string | null, secret = WEBHOOK_SECRET) => {
     const raw = JSON.stringify(payload);
     const headers: Record<string, string> = {
       'content-type': 'application/json',
@@ -43,7 +43,7 @@ async function world(opts: { billing?: boolean } = {}) {
     payload: { subscription: { entity: { id: 'sub_rzp_1', status, current_end: PERIOD_END } } },
   });
   let n = 0;
-  const placeOn = (accountId: string) =>
+  const placeOn = async (accountId: string) =>
     t.app.inject({
       method: 'POST',
       url: '/orders',
@@ -57,7 +57,7 @@ describe('plans and subscription', () => {
   it('lists plans and shows no subscription at first', async () => {
     const w = await world();
     const plans = await w.app.inject({ method: 'GET', url: '/plans', headers: w.me.headers });
-    expect(plans.json().plans).toEqual([
+    expect(plans.json<{ plans: unknown[] }>().plans).toEqual([
       { code: 'pro', name: 'Pro', price: '499.00', interval: 'monthly', limits: { maxAccounts: 5, maxOrdersPerDay: 100, maxFanout: 5, brokers: ['zerodha'] } },
     ]);
     const sub = await w.app.inject({ method: 'GET', url: '/subscription', headers: w.me.headers });
@@ -69,14 +69,15 @@ describe('plans and subscription', () => {
     const w = await world();
     const checkout = await w.app.inject({ method: 'POST', url: '/subscription/checkout', headers: w.me.headers, payload: { planCode: 'pro' } });
     expect(checkout.statusCode).toBe(200);
-    expect(checkout.json()).toEqual({ subscriptionId: expect.any(String), checkoutUrl: 'https://rzp.io/i/abc', status: 'created' });
-    const call = w.razorpay.calls[0]!;
+    expect(checkout.json()).toEqual({ subscriptionId: anyString(), checkoutUrl: 'https://rzp.io/i/abc', status: 'created' });
+    const call = defined(w.razorpay.calls[0]);
     expect(call.headers['Authorization']).toBe(`Basic ${Buffer.from('rzp_test_key:rzp_test_secret').toString('base64')}`);
-    expect(JSON.parse(call.body!)).toMatchObject({ plan_id: 'plan_rzp_pro', total_count: 120, notes: { user_id: w.me.userId, plan_code: 'pro' } });
+    expect(JSON.parse(defined(call.body))).toMatchObject({ plan_id: 'plan_rzp_pro', total_count: 120, notes: { user_id: w.me.userId, plan_code: 'pro' } });
 
     const pending = await w.app.inject({ method: 'GET', url: '/subscription', headers: w.me.headers });
-    expect(pending.json().subscription).toMatchObject({ status: 'created', checkoutUrl: 'https://rzp.io/i/abc' });
-    expect(pending.json().mode).toBe('exit_only');
+    const body = pending.json<{ mode: string; subscription: object }>();
+    expect(body.subscription).toMatchObject({ status: 'created', checkoutUrl: 'https://rzp.io/i/abc' });
+    expect(body.mode).toBe('exit_only');
 
     const applied = await w.webhook(w.subscriptionEvent('active'), 'evt_1');
     expect(applied.statusCode).toBe(200);
@@ -98,7 +99,7 @@ describe('plans and subscription', () => {
     const cancelled = await w.app.inject({ method: 'POST', url: '/subscription/cancel', headers: w.me.headers });
     expect(cancelled.statusCode).toBe(200);
     expect(cancelled.json()).toMatchObject({ mode: 'full', warning: 'Your plan ends at the end of this period.', subscription: { cancelAtPeriodEnd: true } });
-    expect(w.razorpay.calls.at(-1)!.url).toBe('https://api.razorpay.com/v1/subscriptions/sub_rzp_1/cancel');
+    expect(defined(w.razorpay.calls.at(-1)).url).toBe('https://api.razorpay.com/v1/subscriptions/sub_rzp_1/cancel');
   });
 
   it('refuses checkout for an unknown plan and cancel without a subscription', async () => {
@@ -107,14 +108,14 @@ describe('plans and subscription', () => {
     expect((await w.app.inject({ method: 'POST', url: '/subscription/checkout', headers: w.me.headers, payload: {} })).statusCode).toBe(400);
     const cancel = await w.app.inject({ method: 'POST', url: '/subscription/cancel', headers: w.me.headers });
     expect(cancel.statusCode).toBe(404);
-    expect(cancel.json().error.message).toBe('No subscription to cancel.');
+    expect(cancel.json<ErrorBody>().error.message).toBe('No subscription to cancel.');
   });
 
   it('answers 503 billing_unavailable when Razorpay is not configured', async () => {
     const w = await world({ billing: false });
     const res = await w.app.inject({ method: 'POST', url: '/subscription/checkout', headers: w.me.headers, payload: { planCode: 'pro' } });
     expect(res.statusCode).toBe(503);
-    expect(res.json().error.code).toBe('billing_unavailable');
+    expect(res.json<ErrorBody>().error.code).toBe('billing_unavailable');
     expect((await w.webhook(w.subscriptionEvent('active'), 'evt_1')).statusCode).toBe(503);
   });
 });
@@ -129,7 +130,7 @@ describe('POST /webhooks/razorpay', () => {
     expect(unsigned.statusCode).toBe(401);
     const noId = await w.webhook(w.subscriptionEvent('active'), null);
     expect(noId.statusCode).toBe(400);
-    expect(noId.json().error.message).toBe('Missing X-Razorpay-Event-Id.');
+    expect(noId.json<ErrorBody>().error.message).toBe('Missing X-Razorpay-Event-Id.');
   });
 
   it('acknowledges an event for a subscription it does not know', async () => {
@@ -143,12 +144,12 @@ describe('POST /webhooks/razorpay', () => {
 describe('entitlement in the order path', () => {
   it('needs a subscription to place, but cancel and exit always work', async () => {
     const w = await world();
-    const paper = (await w.app.inject({ method: 'POST', url: '/broker-accounts', headers: w.me.headers, payload: { broker: 'zerodha', label: 'Paper' } })).json()
+    const paper = (await w.app.inject({ method: 'POST', url: '/broker-accounts', headers: w.me.headers, payload: { broker: 'zerodha', label: 'Paper' } })).json<{ account: { id: string } }>()
       .account.id;
 
     const refused = await w.placeOn(paper);
     expect(refused.statusCode).toBe(402);
-    expect(refused.json().error).toEqual({
+    expect(refused.json<ErrorBody>().error).toEqual({
       code: 'subscription_required',
       message: 'Placing new orders needs an active subscription. You can still cancel and exit.',
       details: { mode: 'exit_only', reason: 'no_subscription', required_plan: 'pro', upgrade_url: 'https://nexora.test/plans' },
@@ -158,7 +159,7 @@ describe('entitlement in the order path', () => {
     await w.webhook(w.subscriptionEvent('active'), 'evt_1');
     const placed = await w.placeOn(paper);
     expect(placed.statusCode).toBe(207);
-    const parentId = placed.json().parentOrderId;
+    const parentId = placed.json<{ parentOrderId: string }>().parentOrderId;
 
     await w.webhook(w.subscriptionEvent('expired'), 'evt_2');
     expect((await w.placeOn(paper)).statusCode).toBe(402);
@@ -167,6 +168,6 @@ describe('entitlement in the order path', () => {
     expect(cancel.statusCode).toBe(207);
     const exit = await w.app.inject({ method: 'POST', url: `/orders/${parentId}/exit`, headers: { ...w.me.headers, 'idempotency-key': 'key-bill-exit1' }, payload: {} });
     expect(exit.statusCode).toBe(207);
-    expect(exit.json().legs[0].outcome).toBe('exit_placed');
+    expect(defined(exit.json<{ legs: { outcome: string }[] }>().legs[0]).outcome).toBe('exit_placed');
   });
 });

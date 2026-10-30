@@ -1,4 +1,5 @@
 import type { Db } from './db.ts';
+import { single } from '../domain/invariant.ts';
 
 export type AccountMode = 'paper' | 'live';
 export type TokenState = 'none' | 'valid' | 'expired' | 'needs_user_action';
@@ -73,8 +74,8 @@ export class BrokerAccountRepository {
   }
 
   async countForUser(userId: string): Promise<number> {
-    const [row] = await this.db.query<{ n: number }>('SELECT count(*) AS n FROM broker_accounts WHERE user_id = $1', [userId]);
-    return row!.n;
+    const rows = await this.db.query<{ n: number }>('SELECT count(*) AS n FROM broker_accounts WHERE user_id = $1', [userId]);
+    return single(rows, 'a count').n;
   }
 
   async saveToken(id: string, t: { tokenEnc: string | null; expiresAt: Date | null; state: TokenState; message: string | null; authAt: Date | null }): Promise<void> {

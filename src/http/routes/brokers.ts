@@ -5,7 +5,7 @@ import { AppError } from '../../domain/errors.ts';
 import { principalOf } from '../app.ts';
 import { CompleteLinkBody, LinkAccountBody, UpdateAccountBody, parse } from '../schemas.ts';
 
-type WithId = { Params: { id: string } };
+interface WithId { Params: { id: string } }
 
 const page = (title: string, body: string) =>
   `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +

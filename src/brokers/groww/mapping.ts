@@ -1,8 +1,9 @@
 import { BrokerError } from '../../domain/broker-error.ts';
-import type { BrokerSymbol, Exchange, InstrumentType } from '../../domain/instrument.ts';
-import { brokerRupeesToPaise } from '../../domain/money.ts';
+import { isInstrumentType, type BrokerSymbol, type Exchange } from '../../domain/instrument.ts';
+import { brokerRupeesToPaise, positivePaise } from '../../domain/money.ts';
 import type { LegStatus, OrderType } from '../../domain/order.ts';
 import type { BrokerInstrument, BrokerOrder } from '../adapter.ts';
+import { nonEmpty, textOf } from '../http.ts';
 import { mapStatus, type BrokerState } from '../status.ts';
 
 /** Turning Groww Trade API payloads into the adapter contract's types. Pure functions, no I/O. */
@@ -12,7 +13,6 @@ export const SEGMENTS = ['FNO', 'CASH'] as const;
 export type Segment = (typeof SEGMENTS)[number];
 
 const ORDER_TYPE_BACK: Record<string, OrderType> = { MARKET: 'MARKET', LIMIT: 'LIMIT', SL: 'SL', SL_M: 'SL_M' };
-const TYPES = new Set<string>(['EQ', 'FUT', 'CE', 'PE']);
 /** Groww exchange + segment → our exchange. Other combinations aren't traded here. */
 const EXCHANGE_OF: Record<string, Exchange> = {
   'NSE:CASH': 'NSE',
@@ -73,17 +73,17 @@ export function toInstrument(r: Record<string, string>): BrokerInstrument | null
   const marketKey = `${r['exchange'] ?? ''}:${r['segment'] ?? ''}`;
   const exchange = EXCHANGE_OF[marketKey];
   const type = r['instrument_type'] ?? '';
-  if (!exchange || !TYPES.has(type)) return null;
+  const tradingSymbol = r['trading_symbol'] ?? '';
+  if (!exchange || !isInstrumentType(type) || !tradingSymbol) return null;
   const derivative = type !== 'EQ';
-  const tradingSymbol = r['trading_symbol']!;
   return {
     exchange,
-    type: type as InstrumentType,
-    underlying: derivative ? r['underlying_symbol']! : tradingSymbol,
-    expiry: derivative ? r['expiry_date'] || null : null,
+    type,
+    underlying: derivative ? r['underlying_symbol'] ?? tradingSymbol : tradingSymbol,
+    expiry: derivative ? nonEmpty(r['expiry_date']) : null,
     strikePaise: type === 'CE' || type === 'PE' ? brokerRupeesToPaise(r['strike_price']) : null,
     lotSize: Number(r['lot_size']) || 1,
-    tickPaise: brokerRupeesToPaise(r['tick_size']) || 5,
+    tickPaise: positivePaise(r['tick_size']) ?? 5,
     symbol: { nativeId: tradingSymbol, tradingSymbol, exchange: marketKey },
   };
 }
@@ -93,14 +93,14 @@ export function toOrder(r: Record<string, unknown>, segment: Segment): BrokerOrd
   const filled = Number(r['filled_quantity']) || 0;
   const quantity = Number(r['quantity']) || 0;
   return {
-    brokerOrderId: `${segment}:${String(r['groww_order_id'])}`,
-    status: growwStatus(String(r['order_status'] ?? ''), filled, quantity),
+    brokerOrderId: `${segment}:${textOf(r['groww_order_id'])}`,
+    status: growwStatus(textOf(r['order_status']), filled, quantity),
     quantity,
     filledQty: filled,
     avgPricePaise: filled > 0 ? brokerRupeesToPaise(r['average_fill_price']) : null,
-    pricePaise: brokerRupeesToPaise(r['price']) || null,
-    triggerPaise: brokerRupeesToPaise(r['trigger_price']) || null,
-    orderType: ORDER_TYPE_BACK[String(r['order_type'])] ?? null,
+    pricePaise: positivePaise(r['price']),
+    triggerPaise: positivePaise(r['trigger_price']),
+    orderType: ORDER_TYPE_BACK[textOf(r['order_type'])] ?? null,
     clientRef: typeof r['order_reference_id'] === 'string' ? r['order_reference_id'] : null,
     message: typeof r['remark'] === 'string' ? r['remark'] : null,
     raw: r,

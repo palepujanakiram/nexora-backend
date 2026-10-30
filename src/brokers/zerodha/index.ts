@@ -1,9 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 import { BrokerError, classifyMessage, type BrokerErrorCode } from '../../domain/broker-error.ts';
-import type { Exchange, InstrumentType } from '../../domain/instrument.ts';
+import { isExchange, isInstrumentType } from '../../domain/instrument.ts';
 import { nextIstTime } from '../../domain/ist.ts';
-import { brokerRupeesToPaise, rupees } from '../../domain/money.ts';
+import { brokerRupeesToPaise, rupees, positivePaise } from '../../domain/money.ts';
 import type { LegStatus, OrderType, Product } from '../../domain/order.ts';
 import {
   standardModifyProblem,
@@ -24,7 +24,7 @@ import {
   type WebhookHint,
 } from '../adapter.ts';
 import { mapStatus, type BrokerState } from '../status.ts';
-import { extractParam, objectOf, parseCsv, type HttpRequest, type HttpResult } from '../http.ts';
+import { extractParam, nonEmpty, objectOf, parseCsv, textOf, type HttpRequest, type HttpResult } from '../http.ts';
 
 export const KITE_BASE = 'https://api.kite.trade';
 export const KITE_LOGIN = 'https://kite.zerodha.com/connect/login';
@@ -34,7 +34,6 @@ const PRODUCT_BACK: Record<string, Product> = { CNC: 'DELIVERY', MIS: 'INTRADAY'
 const ORDER_TYPE: Record<OrderType, string> = { MARKET: 'MARKET', LIMIT: 'LIMIT', SL: 'SL', SL_M: 'SL-M' };
 const ORDER_TYPE_BACK: Record<string, OrderType> = { MARKET: 'MARKET', LIMIT: 'LIMIT', SL: 'SL', 'SL-M': 'SL_M' };
 const EXCHANGES = new Set<string>(['NSE', 'BSE', 'NFO', 'BFO']);
-const TYPES = new Set<string>(['EQ', 'FUT', 'CE', 'PE']);
 
 const CAPABILITIES: Capabilities = {
   orderTypes: ['MARKET', 'LIMIT', 'SL', 'SL_M'],
@@ -122,17 +121,20 @@ export class ZerodhaAdapter implements BrokerAdapter {
     for (const r of parseCsv(res.text)) {
       const exchange = r['exchange'] ?? '';
       const type = r['instrument_type'] ?? '';
-      if (!EXCHANGES.has(exchange) || !TYPES.has(type) || r['segment'] === 'INDICES') continue;
+      const tradingSymbol = r['tradingsymbol'] ?? '';
+      const nativeId = r['instrument_token'] ?? '';
+      if (!EXCHANGES.has(exchange) || !isExchange(exchange) || !isInstrumentType(type)) continue;
+      if (r['segment'] === 'INDICES' || !tradingSymbol || !nativeId) continue;
       const derivative = type !== 'EQ';
       out.push({
-        exchange: exchange as Exchange,
-        type: type as InstrumentType,
-        underlying: derivative ? r['name']! : r['tradingsymbol']!,
-        expiry: derivative ? r['expiry'] || null : null,
+        exchange,
+        type,
+        underlying: derivative ? r['name'] ?? tradingSymbol : tradingSymbol,
+        expiry: derivative ? nonEmpty(r['expiry']) : null,
         strikePaise: type === 'CE' || type === 'PE' ? brokerRupeesToPaise(r['strike']) : null,
         lotSize: Number(r['lot_size']) || 1,
-        tickPaise: brokerRupeesToPaise(r['tick_size']) || 5,
-        symbol: { nativeId: r['instrument_token']!, tradingSymbol: r['tradingsymbol']!, exchange },
+        tickPaise: positivePaise(r['tick_size']) ?? 5,
+        symbol: { nativeId, tradingSymbol, exchange },
       });
     }
     return out;
@@ -196,8 +198,8 @@ export class ZerodhaAdapter implements BrokerAdapter {
     return net.map((p) => {
       const r = objectOf(p);
       return {
-        symbol: { nativeId: String(r['instrument_token']), tradingSymbol: String(r['tradingsymbol']), exchange: String(r['exchange']) },
-        product: PRODUCT_BACK[String(r['product'])] ?? 'CARRYFORWARD',
+        symbol: { nativeId: textOf(r['instrument_token']), tradingSymbol: textOf(r['tradingsymbol']), exchange: textOf(r['exchange']) },
+        product: PRODUCT_BACK[textOf(r['product'])] ?? 'CARRYFORWARD',
         netQty: Number(r['quantity']) || 0,
         avgPricePaise: brokerRupeesToPaise(r['average_price']),
         lastPricePaise: brokerRupeesToPaise(r['last_price']),
@@ -233,7 +235,7 @@ export class ZerodhaAdapter implements BrokerAdapter {
     if (id === undefined || id === null || id === '') {
       throw new BrokerError('UNKNOWN', 'Kite accepted the request but returned no order id.', res.raw);
     }
-    return { brokerOrderId: String(id), raw: res.raw };
+    return { brokerOrderId: textOf(id), raw: res.raw };
   }
 
   private async call(ctx: AccountContext, req: HttpRequest, authed = true): Promise<unknown> {
@@ -250,7 +252,7 @@ export class ZerodhaAdapter implements BrokerAdapter {
   private error(res: HttpResult): BrokerError {
     const body = objectOf(res.body);
     const message = typeof body['message'] === 'string' ? body['message'] : `HTTP ${res.status}`;
-    const type = String(body['error_type'] ?? '');
+    const type = textOf(body['error_type']);
     let code: BrokerErrorCode;
     if (type === 'TokenException' || res.status === 403) code = 'AUTH_EXPIRED';
     else code = classifyMessage(message) ?? (type === 'OrderException' || type === 'InputException' ? 'REJECTED_BY_EXCHANGE' : 'UNKNOWN');
@@ -261,14 +263,14 @@ export class ZerodhaAdapter implements BrokerAdapter {
 function toOrder(r: Record<string, unknown>): BrokerOrder {
   const filled = Number(r['filled_quantity']) || 0;
   return {
-    brokerOrderId: String(r['order_id']),
-    status: kiteStatus(String(r['status'] ?? ''), filled),
+    brokerOrderId: textOf(r['order_id']),
+    status: kiteStatus(textOf(r['status']), filled),
     quantity: Number(r['quantity']) || 0,
     filledQty: filled,
     avgPricePaise: filled > 0 ? brokerRupeesToPaise(r['average_price']) : null,
-    pricePaise: brokerRupeesToPaise(r['price']) || null,
-    triggerPaise: brokerRupeesToPaise(r['trigger_price']) || null,
-    orderType: ORDER_TYPE_BACK[String(r['order_type'])] ?? null,
+    pricePaise: positivePaise(r['price']),
+    triggerPaise: positivePaise(r['trigger_price']),
+    orderType: ORDER_TYPE_BACK[textOf(r['order_type'])] ?? null,
     clientRef: typeof r['tag'] === 'string' ? r['tag'] : null,
     message: typeof r['status_message'] === 'string' ? r['status_message'] : null,
     raw: r,

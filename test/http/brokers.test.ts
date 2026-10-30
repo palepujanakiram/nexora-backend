@@ -2,7 +2,18 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { signIn, testApp } from '../app.ts';
 import { FakeKite, brokerWorld } from '../fakes.ts';
-import { fakeFetch, json, type FakeFetch } from '../helpers.ts';
+import { fakeFetch, json, type FakeFetch, defined, anyString, stringContaining, type ErrorBody } from '../helpers.ts';
+
+interface Account {
+  id: string;
+  mode: string;
+  token: { state: string; expiresAt: string | null };
+}
+/** What linking an account answers; `link.url` is only read for live accounts, which always have one. */
+interface Linked {
+  account: Account;
+  link: { kind: string; url: string };
+}
 
 const KITE = { apiKey: 'kite-api-key-123', apiSecret: 'kite-SECRET-xyz' };
 
@@ -10,19 +21,19 @@ async function setup(opts: { fetch?: FakeFetch } = {}) {
   const kite = new FakeKite();
   const t = await testApp({ fetch: opts.fetch ?? brokerWorld(kite) });
   const me = await signIn(t);
-  const link = (payload: unknown) => t.app.inject({ method: 'POST', url: '/broker-accounts', headers: me.headers, payload: payload as object });
+  const link = async (payload: unknown) => t.app.inject({ method: 'POST', url: '/broker-accounts', headers: me.headers, payload: payload as object });
   return { ...t, kite, me, link };
 }
 
 /** The `state` that Kite will hand back, read from the login URL's redirect_params. */
-const stateOf = (url: string) => new URLSearchParams(new URL(url).searchParams.get('redirect_params')!).get('state')!;
+const stateOf = (url: string) => defined(new URLSearchParams(defined(new URL(url).searchParams.get('redirect_params'))).get('state'));
 
 describe('GET /brokers', () => {
   it('lists every supported broker with capabilities and credential fields', async () => {
     const t = await setup();
     const res = await t.app.inject({ method: 'GET', url: '/brokers', headers: t.me.headers });
     expect(res.statusCode).toBe(200);
-    const brokers = res.json().brokers as { code: string; label: string; capabilities: object; credentialFields: { name: string }[] }[];
+    const { brokers } = res.json<{ brokers: { code: string; label: string; capabilities: object; credentialFields: { name: string }[] }[] }>();
     expect(brokers.map((b) => b.code).sort()).toEqual(['angelone', 'groww', 'upstox', 'zerodha']);
     for (const b of brokers) {
       expect(b.label).toEqual(expect.any(String));
@@ -39,7 +50,7 @@ describe('POST /broker-accounts', () => {
     expect(res.statusCode).toBe(201);
     expect(res.json()).toEqual({
       account: {
-        id: expect.any(String),
+        id: anyString(),
         broker: 'zerodha',
         label: 'Practice',
         mode: 'paper',
@@ -63,18 +74,18 @@ describe('POST /broker-accounts', () => {
     expect((await t.link({ broker: 'zerodha', label: 'Main' })).statusCode).toBe(201);
     const dup = await t.link({ broker: 'upstox', label: 'main' });
     expect(dup.statusCode).toBe(409);
-    expect(dup.json().error.message).toBe('You already have an account with this name.');
+    expect(dup.json<ErrorBody>().error.message).toBe('You already have an account with this name.');
     expect((await t.link({ broker: 'nope', label: 'X' })).statusCode).toBeGreaterThanOrEqual(400);
     const bad = await t.link({ broker: 'zerodha', label: 'Y', mode: 'demo' });
     expect(bad.statusCode).toBe(400);
-    expect(bad.json().error.message).toMatch(/^mode: /);
+    expect(bad.json<ErrorBody>().error.message).toMatch(/^mode: /);
   });
 
   it('starts the Kite login for a live account with an encrypted state, and never returns the keys', async () => {
     const t = await setup();
     const res = await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE });
     expect(res.statusCode).toBe(201);
-    const { account, link } = res.json();
+    const { account, link } = res.json<Linked>();
     expect(account).toMatchObject({ mode: 'live', apiKeyMasked: 'ki••••23', token: { state: 'none', expiresAt: null } });
     expect(link.kind).toBe('redirect');
     const url = new URL(link.url);
@@ -87,7 +98,7 @@ describe('POST /broker-accounts', () => {
 
     const list = await t.app.inject({ method: 'GET', url: '/broker-accounts', headers: t.me.headers });
     expect(list.statusCode).toBe(200);
-    expect(list.json().accounts.map((a: { id: string }) => a.id)).toEqual([account.id]);
+    expect(list.json<{ accounts: Account[] }>().accounts.map((a) => a.id)).toEqual([account.id]);
     expect(list.body).not.toContain(KITE.apiSecret);
     expect(list.body).not.toContain(KITE.apiKey);
 
@@ -100,25 +111,25 @@ describe('POST /broker-accounts', () => {
 describe('account lifecycle', () => {
   it('switches mode, refusing live without keys', async () => {
     const t = await setup();
-    const paper = (await t.link({ broker: 'zerodha', label: 'P' })).json().account;
+    const paper = (await t.link({ broker: 'zerodha', label: 'P' })).json<Linked>().account;
     const refused = await t.app.inject({ method: 'PATCH', url: `/broker-accounts/${paper.id}`, headers: t.me.headers, payload: { mode: 'live' } });
     expect(refused.statusCode).toBe(400);
 
-    const live = (await t.link({ broker: 'zerodha', label: 'L', mode: 'live', credentials: KITE })).json().account;
+    const live = (await t.link({ broker: 'zerodha', label: 'L', mode: 'live', credentials: KITE })).json<Linked>().account;
     const toPaper = await t.app.inject({ method: 'PATCH', url: `/broker-accounts/${live.id}`, headers: t.me.headers, payload: { mode: 'paper' } });
     expect(toPaper.statusCode).toBe(200);
     expect(toPaper.json()).toMatchObject({ mode: 'paper', token: { state: 'valid' } });
     const back = await t.app.inject({ method: 'PATCH', url: `/broker-accounts/${live.id}`, headers: t.me.headers, payload: { mode: 'live' } });
-    expect(back.json().mode).toBe('live');
+    expect(back.json<Account>().mode).toBe('live');
   });
 
   it('gives the login to redo, finishes it with the request token, and unlinks', async () => {
     const t = await setup();
-    const { account } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json();
+    const { account } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json<Linked>();
 
     const relink = await t.app.inject({ method: 'GET', url: `/broker-accounts/${account.id}/relink`, headers: t.me.headers });
     expect(relink.statusCode).toBe(200);
-    expect(relink.json()).toMatchObject({ kind: 'redirect', url: expect.stringContaining('kite.zerodha.com') });
+    expect(relink.json()).toMatchObject({ kind: 'redirect', url: stringContaining('kite.zerodha.com') });
 
     const done = await t.app.inject({
       method: 'POST',
@@ -128,9 +139,9 @@ describe('account lifecycle', () => {
     });
     expect(done.statusCode).toBe(200);
     expect(done.json()).toMatchObject({ id: account.id, token: { state: 'valid', lastAuthAt: '2026-10-27T04:00:00.000Z', message: null } });
-    expect(done.json().token.expiresAt).toEqual(expect.any(String));
+    expect(done.json<Account>().token.expiresAt).toEqual(expect.any(String));
     expect(done.body).not.toContain('AT-rt-1');
-    const call = t.fetch.calls.find((c) => c.url.endsWith('/session/token'))!;
+    const call = defined(t.fetch.calls.find((c) => c.url.endsWith('/session/token')));
     expect(new URLSearchParams(call.body).get('request_token')).toBe('rt-1');
 
     const del = await t.app.inject({ method: 'DELETE', url: `/broker-accounts/${account.id}`, headers: t.me.headers });
@@ -141,7 +152,7 @@ describe('account lifecycle', () => {
 
   it('returns a paper account unchanged when "linking" it', async () => {
     const t = await setup();
-    const { account } = (await t.link({ broker: 'zerodha', label: 'P' })).json();
+    const { account } = (await t.link({ broker: 'zerodha', label: 'P' })).json<Linked>();
     const res = await t.app.inject({ method: 'POST', url: `/broker-accounts/${account.id}/link`, headers: t.me.headers, payload: {} });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(account);
@@ -151,24 +162,24 @@ describe('account lifecycle', () => {
     const t = await setup({
       fetch: fakeFetch(() => json({ status: 'error', error_type: 'TokenException', message: 'Token is invalid or has expired.' }, 403)),
     });
-    const { account } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json();
+    const { account } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json<Linked>();
     const res = await t.app.inject({ method: 'POST', url: `/broker-accounts/${account.id}/link`, headers: t.me.headers, payload: { params: { request_token: 'x' } } });
     expect([401, 502]).toContain(res.statusCode);
-    expect(res.json().error).toMatchObject({ code: 'broker_login_failed', details: { code: expect.any(String) } });
-    expect(res.statusCode).toBe(res.json().error.details.code === 'AUTH_EXPIRED' ? 401 : 502);
+    expect(res.json<ErrorBody>().error).toMatchObject({ code: 'broker_login_failed', details: { code: anyString() } });
+    expect(res.statusCode).toBe(res.json<ErrorBody>().error.details?.['code'] === 'AUTH_EXPIRED' ? 401 : 502);
     const after = await t.app.inject({ method: 'GET', url: `/broker-accounts/${account.id}`, headers: t.me.headers });
-    expect(after.json().token.state).toBe('needs_user_action');
+    expect(after.json<Account>().token.state).toBe('needs_user_action');
 
     const down = await setup({ fetch: fakeFetch(() => json({ status: 'error', error_type: 'NetworkException', message: 'down' }, 503)) });
-    const acc = (await down.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json().account;
+    const acc = (await down.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json<Linked>().account;
     const r = await down.app.inject({ method: 'POST', url: `/broker-accounts/${acc.id}/link`, headers: down.me.headers, payload: { params: { request_token: 'x' } } });
     expect(r.statusCode).toBe(502);
-    expect(r.json().error.code).toBe('broker_login_failed');
+    expect(r.json<ErrorBody>().error.code).toBe('broker_login_failed');
   });
 
   it("doesn't show or touch another user's account", async () => {
     const t = await setup();
-    const { account } = (await t.link({ broker: 'zerodha', label: 'Mine' })).json();
+    const { account } = (await t.link({ broker: 'zerodha', label: 'Mine' })).json<Linked>();
     const other = await signIn(t, '9123456780');
     expect((await t.app.inject({ method: 'GET', url: `/broker-accounts/${account.id}`, headers: other.headers })).statusCode).toBe(404);
     expect((await t.app.inject({ method: 'DELETE', url: `/broker-accounts/${account.id}`, headers: other.headers })).statusCode).toBe(404);
@@ -179,7 +190,7 @@ describe('account lifecycle', () => {
 describe('GET /broker-callback/:broker', () => {
   it('finishes the Kite login from the browser redirect', async () => {
     const t = await setup();
-    const { account, link } = (await t.link({ broker: 'zerodha', label: 'Kite <main>', mode: 'live', credentials: KITE })).json();
+    const { account, link } = (await t.link({ broker: 'zerodha', label: 'Kite <main>', mode: 'live', credentials: KITE })).json<Linked>();
     const res = await t.app.inject({
       method: 'GET',
       url: `/broker-callback/zerodha?request_token=rt-9&action=login&status=success&state=${encodeURIComponent(stateOf(link.url))}`,
@@ -189,12 +200,12 @@ describe('GET /broker-callback/:broker', () => {
     expect(res.body).toContain('<h1>Account linked</h1>');
     expect(res.body).toContain('Kite &#60;main&#62; is ready to trade.');
     const after = await t.app.inject({ method: 'GET', url: `/broker-accounts/${account.id}`, headers: t.me.headers });
-    expect(after.json().token.state).toBe('valid');
+    expect(after.json<Account>().token.state).toBe('valid');
   });
 
   it('shows an error page for a missing, forged, expired or mismatched state', async () => {
     const t = await setup();
-    const { link } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json();
+    const { link } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json<Linked>();
     const state = stateOf(link.url);
 
     const none = await t.app.inject({ method: 'GET', url: '/broker-callback/zerodha?request_token=rt' });
@@ -218,7 +229,7 @@ describe('GET /broker-callback/:broker', () => {
 
   it('shows a generic 500 page when something unexpected fails', async () => {
     const t = await setup();
-    const { link } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json();
+    const { link } = (await t.link({ broker: 'zerodha', label: 'Kite', mode: 'live', credentials: KITE })).json<Linked>();
     vi.spyOn(t.services.brokerAccounts, 'callback').mockRejectedValueOnce(new Error('db exploded'));
     const res = await t.app.inject({ method: 'GET', url: `/broker-callback/zerodha?request_token=rt&state=${encodeURIComponent(stateOf(link.url))}` });
     expect(res.statusCode).toBe(500);
@@ -232,7 +243,7 @@ describe('POST /webhooks/:broker', () => {
     const t = await setup();
     const res = await t.app.inject({ method: 'POST', url: '/webhooks/groww', payload: { order_id: '1' } });
     expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('not_found');
+    expect(res.json<ErrorBody>().error.code).toBe('not_found');
   });
 
   it('refuses a body that is not an order update', async () => {

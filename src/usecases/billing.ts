@@ -3,7 +3,7 @@ import type { BillingRepository, Plan, Subscription, SubscriptionStatus } from '
 import { newId } from '../data/crypto.ts';
 import { AppError, badRequest, conflict, notFound } from '../domain/errors.ts';
 import { rupees } from '../domain/money.ts';
-import { objectOf } from '../brokers/http.ts';
+import { objectOf, textOf } from '../brokers/http.ts';
 import type { Log } from '../logging.ts';
 import type { EntitlementService } from './entitlements.ts';
 import type { EventBus } from './events.ts';
@@ -85,7 +85,7 @@ export class BillingService {
   async checkout(userId: string, planCode: string) {
     const razorpay = this.razorpay();
     const plan = await this.d.billing.plan(planCode);
-    if (!plan || !plan.active) throw notFound('No such plan.');
+    if (!plan?.active) throw notFound('No such plan.');
     if (!plan.razorpayPlanId) throw badRequest('This plan has no Razorpay plan id yet.');
     const latest = await this.d.billing.latestSubscription(userId);
     if (latest && (latest.status === 'active' || latest.status === 'past_due') && !latest.cancelAtPeriodEnd) {
@@ -119,7 +119,7 @@ export class BillingService {
   async cancel(userId: string) {
     const razorpay = this.razorpay();
     const sub = await this.d.billing.latestSubscription(userId);
-    if (!sub || !sub.providerRef || sub.status === 'cancelled' || sub.status === 'expired') throw notFound('No subscription to cancel.');
+    if (!sub?.providerRef || sub.status === 'cancelled' || sub.status === 'expired') throw notFound('No subscription to cancel.');
     await razorpay.cancelAtCycleEnd(sub.providerRef);
     await this.d.billing.updateSubscription({ ...sub, cancelAtPeriodEnd: true, updatedAt: this.d.clock() });
     this.d.entitlements.invalidate(userId);
@@ -141,7 +141,7 @@ export class BillingService {
     } catch {
       throw badRequest('Webhook body is not JSON.');
     }
-    const type = String(body['event'] ?? 'unknown');
+    const type = textOf(body['event'], 'unknown');
     const entity = objectOf(objectOf(objectOf(body['payload'])['subscription'])['entity']);
     const remote = entity['id'] ? toSubscription(entity) : null;
     const sub = remote ? await this.d.billing.subscriptionByRef(remote.id) : null;

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { BrokerError } from '../../src/domain/broker-error.ts';
 import { AngelOneAdapter, angelExpiry, angelStatus } from '../../src/brokers/angelone/index.ts';
 import type { ModifyRequest, PlaceRequest } from '../../src/brokers/adapter.ts';
-import { clock, ctx, fakeFetch, json, jsonOf, text, token } from '../helpers.ts';
+import { clock, ctx, fakeFetch, json, jsonOf, text, token, defined, stringContaining } from '../helpers.ts';
 
 const angel = new AngelOneAdapter({ clock });
 const SYMBOL = { nativeId: '873210', tradingSymbol: 'SENSEX30OCT2673100PE', exchange: 'BFO' };
@@ -75,7 +75,7 @@ describe('AngelOneAdapter auth', () => {
     const c = ctx(fetch, { credentials: { extra: EXTRA }, token: null });
     const tokens = await angel.completeLink(c, { params: { totp: ' 123 456 ' } });
     expect(tokens).toEqual({ accessToken: 'JWT1', refreshToken: 'RF1', expiresAt: MIDNIGHT_IST });
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(call.method).toBe('POST');
     expect(call.url).toBe('https://apiconnect.angelone.in/rest/auth/angelbroking/user/v1/loginByPassword');
     expect(call.headers).toMatchObject({
@@ -133,7 +133,7 @@ describe('AngelOneAdapter auth', () => {
     const fetch = fakeFetch(() => ok({ jwtToken: 'JWT2', refreshToken: 'RF2' }));
     const result = await angel.refreshSession(ctx(fetch, { token: token({ accessToken: 'JWT1', refreshToken: 'RF1' }) }));
     expect(result).toEqual({ accessToken: 'JWT2', refreshToken: 'RF2', expiresAt: MIDNIGHT_IST });
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(call.url).toBe('https://apiconnect.angelone.in/rest/auth/angelbroking/jwt/v1/generateTokens');
     expect(call.method).toBe('POST');
     expect(call.headers['Authorization']).toBe('Bearer JWT1');
@@ -149,7 +149,7 @@ describe('AngelOneAdapter auth', () => {
     const expired = fakeFetch(() => fail('AG8002', 'Token Expired'));
     expect(await angel.refreshSession(ctx(expired, { token: token({ refreshToken: 'RF1' }) }))).toMatchObject({
       needsUserAction: true,
-      reason: expect.stringContaining('TOTP'),
+      reason: stringContaining('TOTP'),
     });
     const forbidden = fakeFetch(() => fail('', 'Forbidden', 403));
     expect(await angel.refreshSession(ctx(forbidden, { token: token({ refreshToken: 'RF1' }) }))).toMatchObject({ needsUserAction: true });
@@ -168,7 +168,7 @@ describe('AngelOneAdapter orders', () => {
     const fetch = fakeFetch(() => ok({ script: 'X', orderid: '201020000000080', uniqueorderid: 'u-1' }));
     const ack = await angel.placeOrder(ctx(fetch), place());
     expect(ack.brokerOrderId).toBe('201020000000080');
-    const call = fetch.calls[0]!;
+    const call = defined(fetch.calls[0]);
     expect(call.method).toBe('POST');
     expect(call.url).toBe('https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/placeOrder');
     expect(call.headers).toMatchObject({ Authorization: 'Bearer AT', 'X-PrivateKey': 'key123', 'X-UserType': 'USER' });
@@ -259,7 +259,7 @@ describe('AngelOneAdapter orders', () => {
     });
     expect(jsonOf(fetch.calls[1])).toMatchObject({ variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', price: '0', triggerprice: '1.00' });
     expect(jsonOf(fetch.calls[2])).toEqual({ variety: 'NORMAL', orderid: '2501' });
-    expect(fetch.calls[2]!.headers['Authorization']).toBe('Bearer AT');
+    expect(defined(fetch.calls[2]).headers['Authorization']).toBe('Bearer AT');
   });
 
   it('maps a rejected modify to REJECTED_BY_EXCHANGE', async () => {
@@ -282,8 +282,8 @@ describe('AngelOneAdapter orders', () => {
       brokerOrderId: '2501', status: 'PARTIALLY_FILLED', quantity: 40, filledQty: 20, avgPricePaise: 42005, pricePaise: 42100,
       triggerPaise: null, orderType: 'LIMIT', clientRef: 'NXabc123', message: null,
     });
-    expect(fetch.calls[0]!.method).toBe('GET');
-    expect(fetch.calls[0]!.url).toBe('https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getOrderBook');
+    expect(defined(fetch.calls[0]).method).toBe('GET');
+    expect(defined(fetch.calls[0]).url).toBe('https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getOrderBook');
     const e = await brokerError(angel.getOrder(ctx(fetch), '9'));
     expect(e.code).toBe('NOT_FOUND');
     expect(e.message).toContain('no order 9');
@@ -340,8 +340,8 @@ describe('AngelOneAdapter positions and instruments', () => {
       { symbol: { nativeId: '2885', tradingSymbol: 'RELIANCE-EQ', exchange: 'NSE' }, product: 'DELIVERY', netQty: 5, avgPricePaise: null, lastPricePaise: 290000, pnlPaise: 0 },
       { symbol: { nativeId: '1', tradingSymbol: 'X', exchange: 'NSE' }, product: 'CARRYFORWARD', netQty: 0, avgPricePaise: null, lastPricePaise: null, pnlPaise: null },
     ]);
-    expect(fetch.calls[0]!.url).toBe('https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getPosition');
-    expect(fetch.calls[0]!.headers['Authorization']).toBe('Bearer AT');
+    expect(defined(fetch.calls[0]).url).toBe('https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/getPosition');
+    expect(defined(fetch.calls[0]).headers['Authorization']).toBe('Bearer AT');
     expect(await angel.getPositions(ctx(fakeFetch(() => ok(null))))).toEqual([]);
   });
 
@@ -369,8 +369,8 @@ describe('AngelOneAdapter positions and instruments', () => {
       { exchange: 'NFO', type: 'FUT', underlying: 'NIFTY', expiry: '2026-10-29', strikePaise: null, lotSize: 75, tickPaise: 10, symbol: { nativeId: '35001', tradingSymbol: 'NIFTY29OCT26FUT', exchange: 'NFO' } },
       { exchange: 'NFO', type: 'CE', underlying: 'TCS', expiry: '2026-10-29', strikePaise: 400000, lotSize: 175, tickPaise: 5, symbol: { nativeId: '35002', tradingSymbol: 'TCS29OCT264000CE', exchange: 'NFO' } },
     ]);
-    expect(fetch.calls[0]!.method).toBe('GET');
-    expect(fetch.calls[0]!.url).toBe('https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json');
+    expect(defined(fetch.calls[0]).method).toBe('GET');
+    expect(defined(fetch.calls[0]).url).toBe('https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json');
   });
 
   it('fails the instrument download without an http client or on a bad answer', async () => {

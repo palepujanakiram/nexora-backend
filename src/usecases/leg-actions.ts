@@ -14,6 +14,7 @@ import {
   type Outcome,
 } from './order-rules.ts';
 import type { OrderSupport } from './order-support.ts';
+import { must } from '../domain/invariant.ts';
 
 const LAPSED_ADD = 'Your subscription has lapsed: you can reduce or close positions, not add to them.';
 
@@ -44,7 +45,7 @@ export class LegActions {
     if (refusal) return refusal;
     let error: BrokerError | null = null;
     try {
-      const ack = await gateway.cancel(leg.accountId, leg.brokerOrderId!);
+      const ack = await gateway.cancel(leg.accountId, must(leg.brokerOrderId, 'the broker order id of a working leg'));
       await orders.note(leg, { action: 'cancel', source: 'api', raw: ack.raw }, this.s.d.clock());
     } catch (e) {
       error = brokerErrorOf(e);
@@ -59,13 +60,13 @@ export class LegActions {
     const problem = this.problem(start, want, target);
     if (problem) return { outcome: 'not_modifiable', reason: problem };
 
-    const account = (await this.s.d.accounts.find(start.accountId))!;
+    const account = must(await this.s.d.accounts.find(start.accountId), `account ${start.accountId} of an existing leg`);
     const req: ModifyRequest = {
       ...want,
       brokerOrderId: start.brokerOrderId,
       side: target.parent.side,
       product: target.parent.product,
-      symbol: (await this.s.symbolFor(account, target.instrument))!,
+      symbol: must(await this.s.symbolFor(account, target.instrument), 'the broker symbol a working leg was placed with'),
     };
     const fresh = await this.current(userId, start);
     if ('outcome' in fresh) return fresh;
@@ -77,7 +78,7 @@ export class LegActions {
   private async current(userId: string, start: Leg): Promise<{ leg: Leg; order: BrokerOrder } | Outcome> {
     let order: BrokerOrder;
     try {
-      order = await this.s.d.gateway.getOrder(start.accountId, start.brokerOrderId!);
+      order = await this.s.d.gateway.getOrder(start.accountId, must(start.brokerOrderId, 'the broker order id of a working leg'));
     } catch (e) {
       return { outcome: 'failed', reason: brokerErrorOf(e).message };
     }

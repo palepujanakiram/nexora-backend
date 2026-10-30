@@ -4,7 +4,7 @@ import type { Services } from '../../container.ts';
 import { idempotent, principalOf } from '../app.ts';
 import { ListOrdersQuery, ModifyOrderBody, PlaceOrderBody, SubsetBody, parse } from '../schemas.ts';
 
-type WithId = { Params: { id: string } };
+interface WithId { Params: { id: string } }
 
 /**
  * Orders. Every write needs an Idempotency-Key and answers 207 with one
