@@ -18,6 +18,15 @@ primary_region = "sin"
   BILLING_ENABLED = "false"
   OTP_PROVIDER = "msg91"
 
+# The volume from the SQLite version (1.x) stays mounted at /data. The server no
+# longer uses it (data lives in Postgres), but Fly refuses to deploy while a
+# machine has a volume the config doesn't mention, and keeping it preserves the
+# old database as a backup. To retire it later: remove this section and run
+# `fly deploy --yes` once (detaches the volume), then `fly volumes destroy`.
+[[mounts]]
+  source = "nexora_data"
+  destination = "/data"
+
 [http_service]
   internal_port = 8080
   force_https = true

@@ -132,4 +132,6 @@ Brokers may only let you change the IP about once a week, so check it before you
 
 ## Moving from the SQLite version (1.x)
 
-The old `/v1` API and SQLite database are not migrated. Re-create users with `POST /admin/users`, then re-link broker accounts in the app. The old Fly volume (`nexora_data`) can be deleted once you no longer need its data: `fly volumes destroy`.
+The old `/v1` API and SQLite database are not migrated. Re-create users with `POST /admin/users`, then re-link broker accounts in the app.
+
+The old volume (`nexora_data`) stays mounted at `/data` through the `[[mounts]]` section in `fly.toml`. The server no longer reads it, but Fly refuses to deploy while a machine has a volume the config doesn't list, and it keeps the old database as a backup. To retire it: remove that section, run `fly deploy --yes` once (this detaches the volume and replaces the machine), then `fly volumes destroy <volume id>`.
