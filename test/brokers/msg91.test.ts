@@ -1,63 +1,79 @@
 import { describe, expect, it } from 'vitest';
 
-import { MSG91_BASE, Msg91Otp } from '../../src/brokers/msg91.ts';
-import { fakeFetch, json, text } from '../helpers.ts';
+import { ConsoleOtp, MSG91_BASE, Msg91Sms } from '../../src/brokers/msg91.ts';
+import { OtpProviderError } from '../../src/domain/errors.ts';
+import { fakeFetch, json, text, type FakeFetch } from '../helpers.ts';
 
-const client = (fetch: ReturnType<typeof fakeFetch>) => new Msg91Otp({ fetch, authKey: 'AUTHKEY123', templateId: 'TPL1' });
+const sms = (fetch: FakeFetch) => new Msg91Sms({ fetch, authKey: 'AUTHKEY', templateId: 'TPL1' });
+const to = { phone: '919876543210', email: null };
 
-describe('Msg91Otp', () => {
-  it('sends a code with the template, length and expiry, and the key only in the authkey header', async () => {
-    const fetch = fakeFetch(() => json({ type: 'success', request_id: 'r1' }));
-    await client(fetch).send('919876543210', { length: 6, expiryMinutes: 5 });
+async function otpError(p: Promise<unknown>): Promise<OtpProviderError> {
+  try {
+    await p;
+  } catch (e) {
+    if (e instanceof OtpProviderError) return e;
+    throw e;
+  }
+  throw new Error('expected an OtpProviderError');
+}
+
+describe('Msg91Sms', () => {
+  it('sends our code in the otp query parameter with the authkey header', async () => {
+    const fetch = fakeFetch(() => json({ type: 'success', message: 'sent' }));
+    const channel = sms(fetch);
+    expect(channel.name).toBe('sms');
+    expect(channel.canReach()).toBe(true);
+    await channel.send(to, '123456', 5);
+    expect(fetch.calls).toHaveLength(1);
     const call = fetch.calls[0]!;
+    const url = new URL(call.url);
+    expect(`${url.origin}${url.pathname}`).toBe(`${MSG91_BASE}/otp`);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      template_id: 'TPL1',
+      mobile: '919876543210',
+      otp: '123456',
+      otp_length: '6',
+      otp_expiry: '5',
+    });
     expect(call.method).toBe('POST');
-    expect(call.url).toBe(`${MSG91_BASE}/otp?template_id=TPL1&mobile=919876543210&otp_length=6&otp_expiry=5`);
-    expect(call.headers).toEqual({ authkey: 'AUTHKEY123', accept: 'application/json', 'content-type': 'application/json' });
+    expect(call.headers).toEqual({ authkey: 'AUTHKEY', accept: 'application/json', 'content-type': 'application/json' });
     expect(call.body).toBe('{}');
+    expect(call.url).not.toContain('AUTHKEY');
   });
 
-  it('verifies a code', async () => {
-    const fetch = fakeFetch(() => json({ type: 'success', message: 'OTP verified success' }));
-    expect(await client(fetch).verify('919876543210', '123456')).toBe(true);
-    const call = fetch.calls[0]!;
-    expect(call.method).toBe('GET');
-    expect(call.url).toBe(`${MSG91_BASE}/otp/verify?mobile=919876543210&otp=123456`);
-    expect(call.headers).toEqual({ authkey: 'AUTHKEY123', accept: 'application/json' });
-    expect(call.body).toBeUndefined();
+  it('fails on an error answer with the provider message', async () => {
+    const e = await otpError(sms(fakeFetch(() => json({ type: 'error', message: 'Invalid template' }))).send(to, '1234', 5));
+    expect([e.status, e.code, e.message]).toEqual([502, 'otp_send_failed', 'The SMS provider refused: Invalid template']);
   });
 
-  it('accepts success shown only in the message, like ManageMyFloor', async () => {
-    await client(fakeFetch(() => json({ message: 'OTP sent successfully' }))).send('919876543210', { length: 6, expiryMinutes: 5 });
-    expect(await client(fakeFetch(() => json({ message: 'OTP verified success' }))).verify('919876543210', '123456')).toBe(true);
+  it('fails on an HTTP error even when the body says success', async () => {
+    const e = await otpError(sms(fakeFetch(() => json({ type: 'success' }, 401))).send(to, '1234', 5));
+    expect(e.message).toBe('The SMS provider refused: HTTP 401');
   });
 
-  it('treats wrong, expired or used codes as a failed check', async () => {
-    for (const message of ['OTP not match', 'OTP expired', 'Mobile no. already verified', 'Max limit reached for this otp verification']) {
-      const fetch = fakeFetch(() => json({ type: 'error', message }));
-      expect(await client(fetch).verify('919876543210', '123456')).toBe(false);
-    }
+  it('fails on a non-JSON answer', async () => {
+    const e = await otpError(sms(fakeFetch(() => text('<html>bad gateway</html>', 502))).send(to, '1234', 5));
+    expect(e.message).toBe('The SMS provider refused: HTTP 502');
+    const ok = await otpError(sms(fakeFetch(() => text('ok', 200))).send(to, '1234', 5));
+    expect(ok.message).toBe('The SMS provider refused: HTTP 200');
   });
 
-  it('turns provider failures into otp_send_failed or otp_verify_failed without leaking the key', async () => {
-    const cases = [
-      { fetch: fakeFetch(() => json({ type: 'error', message: 'Invalid authkey' })), op: 'verify', msg: "Couldn't check the code: Invalid authkey" },
-      { fetch: fakeFetch(() => json({ type: 'success', message: 'Invalid template id' })), op: 'send', msg: "Couldn't send the code: Invalid template id" },
-      { fetch: fakeFetch(() => json({ type: 'error', error: 'Template not found' })), op: 'send', msg: "Couldn't send the code: Template not found" },
-      { fetch: fakeFetch(() => json({ type: 'error' })), op: 'send', msg: "Couldn't send the code: no reason given" },
-      { fetch: fakeFetch(() => json({ type: 'error', message: 'Unauthorized' }, 401)), op: 'send', msg: 'The SMS provider failed (HTTP 401): Unauthorized' },
-      { fetch: fakeFetch(() => text('<html>bad gateway</html>', 502)), op: 'verify', msg: 'The SMS provider failed (HTTP 502).' },
-      { fetch: fakeFetch(() => Promise.reject(new Error('ECONNRESET AUTHKEY123'))), op: 'send', msg: "Couldn't reach the SMS provider. Try again." },
-      { fetch: fakeFetch(() => Promise.reject(new Error('ECONNRESET'))), op: 'verify', msg: "Couldn't reach the SMS provider. Try again." },
-    ] as const;
-    for (const { fetch, op, msg } of cases) {
-      const api = client(fetch);
-      const run = op === 'send' ? api.send('919876543210', { length: 6, expiryMinutes: 5 }) : api.verify('919876543210', '123456');
-      const error = await run.then(
-        () => null,
-        (e: unknown) => e as Error & { status: number; code: string },
-      );
-      expect(error).toMatchObject({ status: 502, code: op === 'send' ? 'otp_send_failed' : 'otp_verify_failed', message: msg });
-      expect(error!.message).not.toContain('AUTHKEY123');
-    }
+  it('fails when MSG91 is unreachable', async () => {
+    const fetch = fakeFetch(() => {
+      throw new TypeError('fetch failed');
+    });
+    const e = await otpError(sms(fetch).send(to, '1234', 5));
+    expect([e.code, e.message]).toEqual(['otp_send_failed', "Couldn't reach the SMS provider."]);
+  });
+});
+
+describe('ConsoleOtp', () => {
+  it('prints the code', async () => {
+    const lines: string[] = [];
+    const channel = new ConsoleOtp((line) => lines.push(line));
+    expect(channel.name).toBe('console');
+    expect(channel.canReach()).toBe(true);
+    await channel.send(to, '654321');
+    expect(lines).toEqual(['[dev] OTP for +919876543210: 654321']);
   });
 });

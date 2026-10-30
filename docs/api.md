@@ -1,293 +1,268 @@
 # nexora-backend API
 
-Every request and response is JSON. Except for `GET /health`, `POST /v1/auth/register`, `POST /v1/auth/login` and `POST /v1/auth/otp/start` / `verify`, send the token from sign-in:
+Requests and responses are JSON. Prices are rupee strings with up to two decimals (`"420.05"`); numbers are also accepted on input. Internally every price is integer paise.
 
-```
-Authorization: Bearer <token>
-```
+**Authentication.** Endpoints need `Authorization: Bearer <accessToken>` unless marked *public* or *admin*. Admin endpoints take `Authorization: Bearer <ADMIN_TOKEN>` instead.
 
-Errors always look like this, with an HTTP status to match:
+**Tracing.** Send a W3C `traceparent` header to continue your trace. Every response carries one.
+
+**Errors** look like this:
 
 ```json
-{ "error": { "code": "bad_request", "message": "Enter the API key." } }
+{ "error": { "code": "subscription_required", "message": "…", "details": { "required_plan": "pro" } } }
 ```
-
-Some errors add machine-readable `details`, e.g. `{ "retry_after_seconds": 540 }` on an OTP `429`.
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `bad_request` | Missing or invalid fields. The message names the field. |
-| 401 | `unauthorized` | No token, or the session ended or expired. Sign in again. |
-| 403 | `forbidden` | Registration closed or wrong invite code. |
-| 404 | `not_registered` | OTP sign-in for a number with no login: send the invite code too (or sign-up is closed). |
-| 401 | `otp_invalid` | Wrong SMS code. The message says how many tries are left. |
-| 401 | `otp_expired` | No live code for this number (expired, already used, or never sent). Ask for a new one. |
-| 429 | `otp_attempts` | Too many wrong codes. Ask for a new one. |
-| 404 | `not_found` | No such account (or it belongs to someone else), or no such endpoint. |
-| 409 | `conflict` | Email already registered. |
-| 422 | `invalid_signal` | The signal text can't be parsed. |
-| 429 | `rate_limited` | Too many requests, or too many SMS codes (`details.retry_after_seconds` says how long to wait). |
-| 502 | `broker_error` | The broker refused or failed. The message is the broker's. |
-| 502 | `otp_send_failed` / `otp_verify_failed` | MSG91 failed to send or check a code. |
-| 503 | `otp_unavailable` | Mobile sign-in isn't set up on this server (no `MSG91_AUTH_KEY` / `MSG91_TEMPLATE_ID`). |
+| 400 | `bad_request` | Missing or invalid fields; the message names the field. Also a missing `Idempotency-Key`. |
+| 401 | `unauthorized`, `otp_invalid`, `otp_expired`, `refresh_reused`, `bad_signature`, `broker_login_failed` | Not signed in, wrong code, a reused refresh token (the session is ended), a bad webhook signature, or a failed broker login. |
+| 402 | `subscription_required`, `plan_limit` | No active subscription (exit-only), or over a plan limit. `details` names the plan or limit and gives `upgrade_url`. |
+| 403 | `forbidden` | Wrong admin credential, or a client not allowed that grant. |
+| 404 | `not_found` | No such resource (or it's someone else's), or no such endpoint. |
+| 409 | `conflict`, `order_busy`, `idempotency_in_progress` | Duplicate, another change to the same order is running, or the same key is still being processed. |
+| 422 | `market_closed`, `max_notional`, `idempotency_mismatch` | A risk check refused the order, or the key was used for a different request. |
+| 429 | `rate_limited`, `daily_order_cap`, `otp_attempts` | Too many requests, too many orders today, or too many wrong codes. `details.retry_after_seconds` when known. |
+| 502 | `broker_error`, `payment_provider_error`, `otp_send_failed` | An outside provider failed. |
+| 503 | `kill_switch`, `billing_unavailable`, `otp_unavailable` | Trading paused, or a feature not configured. |
 | 500 | `internal` | A bug. Details are in the server log only. |
 
-## Health
+## Sign-in (OTP, multi-client)
 
-`GET /health` (no sign-in needed)
+Every front end is registered as a **client** (`POST /admin/clients`) with its own token lifetimes. Access tokens are EdDSA JWTs that live 15 minutes by default. Refresh tokens are opaque and rotate on every use; replaying an old one ends the whole session.
 
-```json
-{ "status": "ok", "service": "nexora-backend", "version": "1.0.0", "liveTrading": false }
-```
-
-## Sign-in
-
-### `POST /v1/auth/register`
+### `POST /auth/otp/request` (public)
 
 ```json
-{ "email": "you@example.com", "password": "at least 10 chars", "signupCode": "<SIGNUP_CODE>", "device": "Pixel 9" }
+{ "phone": "+91 98765 43210" }
 ```
 
-`201`:
+`200 { "sent": true, "expiresInSeconds": 300 }`. The answer is the same for unregistered numbers, but no SMS is sent to them. Limits: 3 codes per number per hour and 20 per IP per hour (`429` with `retry_after_seconds`). Codes are valid for 5 minutes and allow 5 tries.
+
+### `POST /auth/otp/verify` (public)
 
 ```json
-{ "token": "…", "user": { "id": "…", "email": "you@example.com", "phone": null } }
+{ "phone": "9876543210", "code": "123456", "clientId": "cl_…", "device": "iPhone 16" }
 ```
-
-Store the token in secure storage on the device. Sessions last `SESSION_DAYS` (30 by default).
-
-### `POST /v1/auth/login`
-
-Body `{ email, password, device }`. The response is the same as for register. A wrong email or password returns `401`.
-
-### `POST /v1/auth/otp/start`
-
-Texts a code to an Indian mobile number through MSG91. The request and response match ManageMyFloor's `/auth/otp/start`, so the same app code can drive both.
-
-```json
-{ "phone": "+91 98765 43210", "signupCode": "<SIGNUP_CODE>" }
-```
-
-- The number is either `phone` or `countryCode` + `mobile` (`{ "countryCode": "+91", "mobile": "9876543210" }`). Only India (`+91`) works. `phone` may have `+91`, `91` or `0` in front, and spaces, dashes and brackets are ignored. The 10 digits must start with 6–9.
-- `signupCode`: only needed when the number has no login yet. Without it, the server answers `404 not_registered` and sends nothing, so the app can ask for the invite code and try again. When sign-up is closed (`SIGNUP_CODE` unset), only numbers that already have a login can sign in.
-
-`200`:
-
-```json
-{ "sent": true, "expires_in_seconds": 300 }
-```
-
-Limits (`429 rate_limited`, with `details.retry_after_seconds`): 5 codes per number per 15 minutes, and 20 per client IP per hour. The endpoint also shares the sign-in rate limit (`AUTH_RATE_LIMIT_PER_MINUTE`). Codes are `MSG91_OTP_LENGTH` digits (6 by default) and expire after `MSG91_OTP_EXPIRY_MINUTES` (5 by default).
-
-### `POST /v1/auth/otp/verify`
-
-```json
-{ "phone": "+919876543210", "code": "123456", "device": "Pixel 9" }
-```
-
-`countryCode` + `mobile` works here too. MSG91 checks the code. On success, the server signs the device in. If the number had no login and the code was sent with the right invite code, the user is created now, with no email or password.
 
 `200`:
 
 ```json
 {
-  "token": "…",
-  "user": { "id": "…", "email": null, "phone": "+919876543210" },
-  "tokens": { "access_token": "…", "token_type": "Bearer", "expires_in": 2592000 }
+  "accessToken": "eyJ…", "tokenType": "Bearer", "expiresIn": 900,
+  "refreshToken": "rt_…", "refreshExpiresAt": "2026-11-26T04:00:00.000Z", "sessionId": "ses_…",
+  "user": { "id": "usr_…", "phone": "+919876543210", "email": null, "createdAt": "…" }
 }
 ```
 
-`token` and `tokens.access_token` are the same bearer token, and it works everywhere else in the API. `tokens` follows ManageMyFloor's shape. There is no refresh token: the session lasts `SESSION_DAYS`, then the user signs in again.
+### `POST /auth/refresh` (public)
 
-- Each code allows 5 tries. A wrong code is `401 otp_invalid`; after the fifth, `429 otp_attempts`.
-- An expired or already used code is `401 otp_expired`. Ask for a new code.
-- Users created this way have no password, so `POST /v1/auth/password` returns `400` for them.
+`{ "refreshToken": "rt_…", "clientId": "cl_…" }` returns a new pair with the same shape (without `user`). Throw the old refresh token away.
 
-### `POST /v1/auth/logout`
+### Sessions
 
-Ends this device's session. Returns `204`.
+| | |
+|---|---|
+| `GET /me` | The signed-in user. |
+| `POST /auth/logout` | Ends this session. `204`. |
+| `GET /auth/sessions` | `{ sessions: [{ id, clientId, device, ip, createdAt, lastUsedAt, expiresAt, current }] }` |
+| `DELETE /auth/sessions/:id` | Signs one device out. `204`. |
+| `GET /.well-known/jwks.json` (public) | Public keys for verifying access tokens locally. |
 
-### `POST /v1/auth/password`
+Entitlements are deliberately **not** in the access token. They're checked on every order.
 
-Body `{ currentPassword, newPassword, device }`. Signs out every device, then returns a new `{ token, user }` for this one.
+## Admin
 
-### `GET /v1/me`
+| | |
+|---|---|
+| `POST /admin/users` | `{ phone, email? }` → `201` user. The only way users are created. |
+| `POST /admin/clients`, `GET /admin/clients` | `{ name, platform: web\|ios\|android\|partner\|other, grantTypes?, accessTtlSeconds? (60–3600, default 900), refreshTtlSeconds? (default 30 days) }` |
+| `GET /admin/kill-switch`, `POST /admin/kill-switch` | `{ on: true, reason: "bad fills" }`. Takes effect on the next order. While on, every outbound order (entry, modify, exit) is refused with `503 kill_switch`; cancels still go out. |
+| `POST /admin/plans` | Upsert a plan: `{ code, name, price, interval: monthly\|yearly, maxAccounts, maxOrdersPerDay, maxFanout, brokers: [...], razorpayPlanId, active }`. |
+| `POST /admin/holidays`, `GET /admin/holidays` | `{ day: "2026-11-09", name: "Diwali" }`: no new entries on these days. |
+| `POST /admin/instruments/refresh` | `{ brokers?: [...] }`: downloads the brokers' instrument masters now (it also runs daily at 08:15 IST). |
+| `GET /admin/reconciliation/issues`, `POST /admin/reconciliation/issues/:id/resolve` | Mismatches the end-of-day comparison found, for a human to check. |
+| `POST /admin/jobs/:name/run` | `reconcile`, `eod_reconcile`, `analytics`, `sessions_refresh`, `reencrypt` (after adding a key version). |
+
+## Brokers and accounts
+
+### `GET /brokers`
 
 ```json
-{ "id": "…", "email": "you@example.com", "phone": null, "createdAt": "2026-10-27T04:00:00.000Z" }
+{ "brokers": [{ "code": "zerodha", "label": "Zerodha (Kite Connect)",
+  "capabilities": { "orderTypes": ["MARKET","LIMIT","SL","SL_M"], "products": ["DELIVERY","INTRADAY","CARRYFORWARD"],
+                    "exchanges": ["NSE","BSE","NFO","BFO"], "modifiable": ["price","quantity","triggerPrice","orderType"],
+                    "ratePerSecond": 10, "headlessRefresh": false, "webhooks": true },
+  "credentialFields": [{ "name": "apiKey", "label": "API key", "secret": false, "required": true }, …] }, …] }
 ```
 
-`email` is `null` for users who signed up with a mobile number; `phone` is `+91XXXXXXXXXX` or `null`.
+### `POST /broker-accounts`
 
-## Accounts
+```json
+{ "broker": "zerodha", "label": "Kite – main", "mode": "paper",
+  "credentials": { "apiKey": "…", "apiSecret": "…" } }
+```
 
-An account as the app sees it. The secret and the access token are never returned.
+The `credentials` keys are the broker's `credentialFields` (Upstox also needs `redirectUri`; Angel One needs `clientCode` and `pin`). They're optional for paper accounts and required to switch to live. `201`:
+
+```json
+{ "account": { "id": "ba_…", "broker": "zerodha", "label": "Kite – main", "mode": "live", "apiKeyMasked": "ki••••23",
+               "token": { "state": "none", "expiresAt": null, "lastAuthAt": null, "message": null }, "createdAt": "…" },
+  "link": { "kind": "redirect", "url": "https://kite.zerodha.com/connect/login?…", "message": "…" } }
+```
+
+`link` says how to log in to the broker. **`redirect`**: open `url`. The broker redirects to `<PUBLIC_URL>/broker-callback/<broker>`, which finishes the link and shows a confirmation page. If the app catches the redirect itself, post its parameters to `/link` instead. **`input`**: ask the user for `fields` (a TOTP for Angel One; optional for Groww), then post them to `/link`.
+
+| | |
+|---|---|
+| `GET /broker-accounts` | Every account with token health: `token.state` is `valid`, `expired`, `needs_user_action` or `none`. |
+| `GET /broker-accounts/:id` | One account. |
+| `PATCH /broker-accounts/:id` | `{ mode: "live" \| "paper" }` |
+| `GET /broker-accounts/:id/relink` | A fresh `link` challenge, for daily re-login. |
+| `POST /broker-accounts/:id/link` | `{ params: { request_token: "…" } }` (Kite), `{ params: { code: "…" } }` (Upstox), `{ params: { totp: "123456" } }` (Angel One, and Groww optionally), or `{ params: { url: "<the full redirect URL>" } }`. |
+| `DELETE /broker-accounts/:id` | Unlinks and deletes the stored credentials. `204`. |
+
+Sessions end daily: Kite and Groww at 06:00 IST, Upstox at 03:30 IST. A job at 06:05 IST renews Angel One sessions headlessly and flags the others as `needs_user_action`; the app gets a `relink_needed` event on `/stream`.
+
+## Instruments
+
+`GET /instruments?underlying=NIFTY&type=CE&expiry=2026-10-29&exchange=NFO&limit=100`:
+
+```json
+{ "instruments": [{ "id": "NFO:CE:NIFTY:2026-10-29:2450000", "exchange": "NFO", "type": "CE", "underlying": "NIFTY",
+                    "expiry": "2026-10-29", "strike": "24500.00", "lotSize": 75, "tickSize": "0.05" }] }
+```
+
+Ids: `NSE:EQ:RELIANCE`, `NFO:FUT:NIFTY:2026-10-29`, `BFO:PE:SENSEX:2026-10-29:7310000` (the strike is in paise).
+
+`POST /signals/parse` `{ text: "BUY NIFTY 29 OCT 24500 CALL AT 120-125 SL 100 TGT 150" }` returns the parsed `signal`, its `instrumentId` (null if it isn't in the master), and suggested `order` fields. It places nothing.
+
+## Orders
+
+Every write needs an **`Idempotency-Key`** header (8–200 characters, unique per intended action) and answers **`207`** with one result per leg. Sending the same key and body again returns the stored answer with `Idempotent-Replayed: true`, and nothing is sent twice. If a request is refused before anything reaches a broker (validation, `402`, risk), the key is freed and can be retried.
+
+### `POST /orders`: fan-out place (needs an active subscription)
+
+```json
+{ "instrumentId": "NFO:CE:NIFTY:2026-10-29:2450000", "side": "BUY", "quantity": 150,
+  "orderType": "LIMIT", "product": "CARRYFORWARD", "price": "420.00",
+  "referencePrice": "419.50", "accountIds": ["ba_1", "ba_2", "ba_3"] }
+```
+
+- `orderType`: `MARKET`, `LIMIT`, `SL` (stop-loss limit: `price` and `triggerPrice`) or `SL_M` (stop-loss market: `triggerPrice`).
+- `product`: `DELIVERY` (equity cash), `INTRADAY`, or `CARRYFORWARD` (overnight F&O).
+- `quantity`: units, a multiple of the lot size. It's the same on every account.
+- `referencePrice`: the price the user saw. It's required for market orders (for the order-value check) and is used to measure slippage.
+
+`207`:
 
 ```json
 {
-  "id": "N1j-B6Ll0pMDMC9E",
-  "broker": "upstox",
-  "brokerLabel": "Upstox",
-  "label": "Family",
-  "apiKeyMasked": "upke••••34",
-  "redirectUri": "https://127.0.0.1/",
-  "enabled": true,
-  "lots": 1,
-  "product": "carryForward",
-  "paperMode": true,
-  "loggedIn": false,
-  "tokenIssuedAt": null,
-  "login": { "kind": "redirect", "url": "https://api.upstox.com/v2/login/authorization/dialog?…", "codeParam": "code", "redirectUri": "https://127.0.0.1/" }
-}
-```
-
-- `broker`: `zerodha`, `upstox` or `groww`.
-- `product`: `carryForward` (NRML; Upstox `D`) or `intraday` (MIS; Upstox `I`).
-- `login`: the same thing `GET /v1/accounts/:id/login` returns. It saves a request.
-- `loggedIn`: whether today's broker session is still valid. Sessions reset daily at 06:00 IST (Kite, Groww) or 03:30 IST (Upstox).
-
-### `GET /v1/accounts`
-
-Returns `{ "accounts": [ … ] }`, oldest first.
-
-### `POST /v1/accounts`
-
-```json
-{
-  "broker": "upstox",
-  "label": "Family",
-  "apiKey": "…",
-  "apiSecret": "…",
-  "redirectUri": "https://127.0.0.1/",
-  "lots": 1,
-  "product": "carryForward",
-  "enabled": true,
-  "paperMode": true
-}
-```
-
-- `redirectUri` is required for Upstox and must exactly match the one saved in your Upstox app. It's ignored for the other brokers.
-- `lots`, `product`, `enabled` and `paperMode` are optional. **`paperMode` defaults to `true`.**
-- Returns `201` with the account.
-
-### `GET /v1/accounts/:id`, `PATCH /v1/accounts/:id`, `DELETE /v1/accounts/:id`
-
-- `PATCH` takes any of the create fields.
-- Send `apiSecret` only to change it; an empty value keeps the stored one.
-- Changing the broker, key, secret or redirect URI ends the broker session.
-- `DELETE` returns `204`.
-
-## Broker login (once a day per account)
-
-### `GET /v1/accounts/:id/login`
-
-How to log in today.
-
-For Zerodha and Upstox, the response is a page to open and the redirect to catch:
-
-```json
-{ "kind": "redirect", "url": "https://kite.zerodha.com/connect/login?v=3&api_key=…", "codeParam": "request_token", "redirectUri": null }
-```
-
-1. Open `url` in the app's in-app browser.
-2. Catch the navigation to `redirectUri` (Upstox) or to any address carrying `codeParam` (Zerodha).
-3. Send that address to `/session`.
-
-For Groww, the response is a page where the user approves the key:
-
-```json
-{ "kind": "approval", "url": "https://groww.in/trade-api/api-keys" }
-```
-
-The user approves the key there, then the app calls `/session` with an empty `input`, or with a 6-digit TOTP code.
-
-### `POST /v1/accounts/:id/session`
-
-Body `{ "input": "https://127.0.0.1/?code=…" }`. `input` can be the full redirect URL or just the code; for Groww it's empty or a TOTP code. The server exchanges it for the access token from its static IP and stores the token encrypted. Returns the account with `loggedIn: true`.
-
-### `DELETE /v1/accounts/:id/session`
-
-Forgets the access token.
-
-## Signals
-
-### `POST /v1/signals/parse`
-
-Body `{ "text": "BUY SENSEX 29 OCT 73100 PUT AT 400-420 WITH SL OF 300 TGT1 540, TGT2 600" }`:
-
-```json
-{
-  "signal": {
-    "action": "BUY", "underlying": "SENSEX", "expiry": "2026-10-29", "strike": 73100, "optionType": "PE",
-    "entryLow": 400, "entryHigh": 420, "stopLoss": 300, "targets": [540, 600], "raw": "…", "warnings": []
-  },
-  "contract": "SENSEX 29 OCT 2026 73100 PE",
-  "entry": "400–420",
-  "exchange": "BFO"
-}
-```
-
-When the signal has no year, the server uses the next occurrence of that date in India, counting today.
-
-### `POST /v1/signals/execute`
-
-```json
-{
-  "text": "BUY SENSEX 29 OCT 73100 PUT AT 400-420 WITH SL OF 300 TGT1 540",
-  "accountIds": ["N1j-B6Ll0pMDMC9E"],
-  "settings": { "entryPriceMode": "high", "exitMode": "withStopAndTarget", "targetIndex": 0 },
-  "allowDuplicate": false
-}
-```
-
-- `settings` is optional; the values shown are the defaults.
-  - `entryPriceMode`: `low`, `mid` or `high`.
-  - `exitMode`: `entryOnly` or `withStopAndTarget`.
-  - `targetIndex`: `0` = TGT1.
-- `allowDuplicate: true` places the signal even if it was already placed on the account within `DUPLICATE_WINDOW_MINUTES`. Use it for a deliberate repeat.
-
-The response has one result per account. A failed account doesn't stop the others:
-
-```json
-{
-  "results": [
-    {
-      "id": "…", "accountId": "…", "accountLabel": "Family", "broker": "Upstox",
-      "signalText": "…", "paper": false, "time": "2026-10-27T04:00:00.000Z",
-      "symbol": "SENSEX 73100 PE 29 OCT 26", "quantity": 20, "entryPrice": 420,
-      "orders": [{ "kind": "GTT entry+SL 300+TGT 540", "id": "GTT-123" }],
-      "error": null, "errorCode": null, "success": true
-    }
+  "parentOrderId": "po_…",
+  "status": "IN_PROGRESS",
+  "legs": [
+    { "legId": "leg_…", "accountId": "ba_1", "broker": "zerodha", "mode": "live", "status": "OPEN",
+      "brokerOrderId": "250110400012345", "quantity": 150, "filledQty": 0, "avgPrice": null,
+      "orderType": "LIMIT", "price": "420.00", "triggerPrice": null, "reconcileScheduled": true },
+    { "legId": "leg_…", "accountId": "ba_2", "broker": "angelone", "status": "REJECTED",
+      "error": { "code": "INSUFFICIENT_FUNDS", "message": "Angel One: …" }, "reconcileScheduled": false, … },
+    { "legId": "leg_…", "accountId": "ba_3", "broker": "upstox", "status": "UNKNOWN",
+      "error": { "code": "TIMEOUT", "message": "upstox did not answer within 8000 ms." }, "reconcileScheduled": true, … }
   ]
 }
 ```
 
-An account comes back with `success: false` and an `error` when any of the following happens. For the duplicate checks, `errorCode` says which one it was, so the app can offer **Place anyway**.
+**Leg status:** `PENDING_SUBMIT → SUBMITTED → OPEN → (PARTIALLY_FILLED) → FILLED | CANCELLED | REJECTED | EXPIRED`, plus `UNKNOWN`: the broker may or may not have the order. Reconciliation resolves it by finding our client reference in the broker's order book. If the broker still has no record after several minutes, the leg becomes `REJECTED` with `NOT_FOUND`.
 
-- The broker session expired. Log in again.
-- `LIVE_TRADING` is off for a live account.
-- The signal was already placed on it recently (`errorCode: "duplicate"`).
-- The signal is being placed on it from another device right now (`errorCode: "in_flight"`).
-- The broker rejected the order.
+**Parent status** is derived from the legs: `IN_PROGRESS` while any leg is unresolved; `COMPLETE` when all filled; `PARTIAL` when some filled; `FAILED` when none were accepted; `CANCELLED` when accepted legs were cancelled or expired unfilled.
 
-Paper accounts never send orders. They return `PAPER-…` ids, and they still resolve the real contract when logged in.
+**Error codes on legs:** `AUTH_EXPIRED`, `INSUFFICIENT_FUNDS`, `RATE_LIMITED`, `MARKET_CLOSED`, `INVALID_SYMBOL` (also: no mapping for that broker), `REJECTED_BY_EXCHANGE`, `UNSUPPORTED` (the broker can't do this order type, product or exchange; refused before sending), `NOT_IN_PLAN`, `NOT_FOUND`, `TIMEOUT` / `BROKER_UNAVAILABLE` (the leg is `UNKNOWN`), `DRY_RUN` (`LIVE_TRADING` is off), `UNKNOWN`.
 
-## Activity
+Before any leg is sent the server checks the kill switch, market hours (09:15–15:30 IST on weekdays, minus `/admin/holidays`), the plan's fan-out width, the daily order cap (plan, and `RISK_MAX_ORDERS_PER_DAY`), and the order value per account (`RISK_MAX_NOTIONAL_RUPEES`).
 
-### `GET /v1/activity?limit=100`
+### `POST /orders/:id/cancel` (never gated by subscription)
 
-Returns `{ "results": [ … ] }`, newest first. `limit` is 1–500 (default 100). The items have the same shape as the execute results.
+`{ accountIds?: [...] }` (default: every leg). Each leg gets an `outcome`:
 
-### `DELETE /v1/activity`
+- `cancelled`: the broker confirmed it.
+- `cancel_requested`: accepted but not yet confirmed; reconciliation follows it.
+- `not_cancellable`: with `reason`, e.g. "Already filled.".
+- `unknown`: the broker hasn't confirmed it has the order.
+- `failed`: with `reason`.
 
-Clears your log. Returns `204`.
+### `POST /orders/:id/modify` (never gated by subscription)
 
-## Server
+`{ accountIds?, quantity?, price?, triggerPrice?, orderType? }`. Outcomes: `modified`, `modify_requested`, `not_modifiable` (with `reason`: finished, a bad combination, or the broker's partial-fill rule), `failed`, `unknown`. Users in exit-only mode can reduce quantity but not add to it.
 
-### `GET /v1/server/ip`
+### `POST /orders/:id/exit` (never gated by subscription)
+
+`{ accountIds?: [...] }`. For each account this cancels whatever is still open on the entry, reads the live position from the broker, and sends an opposite-side **market** order for the quantity actually held. That's never more than this order filled minus earlier exits.
 
 ```json
-{ "ip": "203.0.113.7", "liveTrading": false }
+{ "parentOrderId": "po_entry", "exitOrderId": "po_exit", "exitStatus": "IN_PROGRESS",
+  "legs": [
+    { "accountId": "ba_1", "outcome": "exit_placed", "heldQty": 150, "cancelledRemainder": false, "exitLeg": { … } },
+    { "accountId": "ba_2", "outcome": "nothing_to_exit", "reason": "Already exited." } ] }
 ```
 
-The public IP brokers see your orders coming from. Register it as the static IP with Zerodha, Upstox and Groww.
+The exit is its own order (`kind: "EXIT"`, `exitOf` the entry), tracked the same way.
+
+### Reads
+
+| | |
+|---|---|
+| `GET /orders?limit=50&before=<ISO time>` | Newest first, each with its legs. |
+| `GET /orders/:id` | `{ parentOrderId, kind, exitOf, status, instrumentId, side, quantity, orderType, product, price, triggerPrice, referencePrice, algoId, clientId, createdAt, updatedAt, legs }` |
+| `GET /orders/:id/legs/:legId/events` | The leg's audit trail: every transition with the raw broker request and response (no credentials). |
+
+## Positions
+
+`GET /positions` (never gated): live from each broker. An account whose broker call fails is reported with `error` rather than dropped.
+
+```json
+{ "accounts": [{ "accountId": "ba_1", "broker": "zerodha", "mode": "live", "syncedAt": "…",
+  "positions": [{ "instrumentId": "NFO:CE:NIFTY:…", "tradingSymbol": "NIFTY26O2924500CE", "exchange": "NFO",
+                  "product": "CARRYFORWARD", "netQty": 150, "avgPrice": "420.00", "lastPrice": "425.50", "pnl": "825.00" }] }] }
+```
+
+## Billing
+
+| | |
+|---|---|
+| `GET /plans` | Active plans with their limits. |
+| `GET /subscription` | `{ mode: "full" \| "exit_only", reason, warning, plan, subscription: { status, currentPeriodEnd, graceUntil, cancelAtPeriodEnd, checkoutUrl } }` |
+| `POST /subscription/checkout` | `{ planCode }` → `{ subscriptionId, checkoutUrl, status: "created" }`. Open `checkoutUrl` to authorise the UPI AutoPay / e-mandate. |
+| `POST /subscription/cancel` | Cancels at the end of the paid period. |
+| `POST /webhooks/razorpay` (public) | Razorpay's webhook: checks `X-Razorpay-Signature`, is idempotent by `X-Razorpay-Event-Id`, and is the only thing that makes a subscription active. |
+
+If a renewal fails, trading stays allowed for `GRACE_DAYS` (3) with a `warning`, then drops to exit-only.
+
+## Analytics
+
+These read only the analytics tables, never the live order tables. They're refreshed every minute from the order outbox.
+
+- `GET /analytics/execution?from=2026-10-01&to=2026-10-31&groupBy=broker|instrument` →
+  `{ from, to, rows: [{ broker, instrumentId?, side?, legs, filled, rejected, fillRate, rejectionRate, rejectionsByReason, avgSlippageBps, avgTimeToFillMs }] }`. Slippage is in basis points against the price at submission; positive means worse for you. Group by `instrument` to compare the same contract across brokers.
+- `GET /analytics/pnl?from=…&to=…` → `{ from, to, realisedTotal, realised: [{ accountId, instrumentId, realised }], unrealised: [{ accountId, tradingSymbol, netQty, unrealised, asOf }] }`. Realised P&L uses the average-cost method. Unrealised comes from the last positions the brokers reported.
+
+## Live updates: `WS /stream`
+
+Connect with `Authorization: Bearer <accessToken>`, or `?access_token=` from a browser. Messages:
+
+```json
+{ "type": "ready" }
+{ "type": "leg", "parentOrderId": "po_…", "parentStatus": "PARTIAL", "leg": { …same as in the 207… } }
+{ "type": "relink_needed", "accountId": "ba_…", "broker": "zerodha", "message": "…" }
+{ "type": "entitlement", "mode": "exit_only" }
+```
+
+A bad token closes the socket with code `4401`.
+
+## Webhooks and redirects (public)
+
+- `GET /broker-callback/:broker`: where Kite and Upstox send the browser after login. The encrypted `state` names the account and expires after 15 minutes.
+- `POST /webhooks/:broker`: broker order postbacks (Kite's are checked against the account's API secret). They only trigger a fresh read of the order from the broker; their contents are never trusted.
+
+## Other
+
+- `GET /health` (public): `{ status, service, version, liveTrading, billing }`
+- `GET /server/ip`: the egress IP brokers see. Register it with every broker.

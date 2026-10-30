@@ -1,101 +1,71 @@
 # nexora-backend
 
-The server for [NexoraApp](https://github.com/palepujanakiram/nexora-app). It keeps your broker accounts in one place and places option signals on Zerodha, Upstox and Groww **from a single static IP**, so any number of phones, tablets or browsers can use the same broker API keys.
-
-Under SEBI's rules for retail API trading, brokers accept API orders only from a static IP you register with them. When every device places orders itself, every device needs that IP. With nexora-backend, the devices talk to the server and the server talks to the brokers, so you register one IP: the server's.
+The execution server for [NexoraApp](https://github.com/palepujanakiram/nexora-app). One order from the user fans out to several broker accounts (Zerodha, Upstox, Angel One, Groww), and each account's order is tracked until it's finished. Everything leaves from a single static IP, as SEBI's retail algo rules require.
 
 ```
- iPhone ─┐                                   ┌─▶ Zerodha (Kite Connect)
- Android ┼──HTTPS──▶  nexora-backend on Fly  ┼─▶ Upstox
- Web    ─┘            (static egress IP)     └─▶ Groww
+ iPhone ─┐                                          ┌─▶ Zerodha (Kite Connect)
+ Android ┼──HTTPS──▶ nexora-backend ──static IP─────┼─▶ Upstox
+ Web    ─┘           (Fly, Singapore)               ├─▶ Angel One (SmartAPI)
+                          │                         └─▶ Groww
+                       Postgres
 ```
+
+This is an execution layer, not a strategy engine. It doesn't generate signals, backtest, or hold positions of its own.
+
+## Three rules the code is built around
+
+1. **Every broker write can fail on its own.** A fan-out returns HTTP 207 with one result per account. A rejection on one account never rolls back or blocks the others.
+2. **Nothing is assumed: every write is confirmed.** After a place, modify or cancel, the order is read back from the broker. A timeout or 5xx leaves the leg `UNKNOWN`, and reconciliation finds it in the broker's order book by our client reference.
+3. **A user can always close a position.** Cancel, modify and exit are never blocked by the subscription. When a subscription lapses the user drops to *exit-only*: no new entries, but full access to cancel, exit, positions and history.
 
 ## What it does
 
-- **Accounts in one place.** Broker API keys, secrets and the day's access tokens are stored on the server and encrypted with AES-256-GCM. The app only ever sees a masked key.
-- **One daily broker login, shared by every device.** Log in to Zerodha or Upstox once in the app (the in-app login sends the redirect to the server), or approve Groww for the day. Every device can then trade.
-- **Signal execution.** Parses signals such as `BUY SENSEX 29 OCT 73100 PUT AT 400-420 SL 300 TGT1 540`, resolves the exact contract, and places the entry plus stop loss and target (Kite GTT OCO, Upstox GTT MULTIPLE; Groww entry only). Same rules as the app.
-- **No duplicate orders.** If the same signal was already placed on an account in the last 15 minutes (from any device), the server refuses it unless the app asks to place it anyway. Two devices sending it at the same moment can't both get through.
-- **Shared activity log.** Every device sees every execution.
-- **Safety switches.**
-  - New accounts start in paper mode.
-  - Live orders need `LIVE_TRADING=true` on the server.
-  - Sign-up needs an invite code, whether by email or mobile number.
-  - Sign-in attempts are rate-limited, and SMS codes are limited per number and per IP, with 5 tries per code.
+- **Accounts.** A user links any number of broker accounts, including two at the same broker. Credentials and session tokens are encrypted per field with AES-256-GCM, and each ciphertext records its key version so keys can rotate. The API only ever returns a masked key.
+- **Daily broker login.** Kite and Upstox use a browser redirect to `/broker-callback/<broker>`. Groww is approve-and-connect. Angel One uses a TOTP and then refreshes headlessly. Accounts whose session needs the user are flagged, and the app is told over `/stream`.
+- **Orders.** Place, modify, cancel and exit across accounts. Every write needs an `Idempotency-Key` and takes a lock on the order, so a retry or a second device can't double an order or double a square-off. Exit reads the live position from each broker and sells only what's actually held.
+- **Instrument master.** One canonical id per contract (`NFO:CE:NIFTY:2026-10-29:2450000`), mapped to each broker's own identifier and refreshed every morning. A broker with no mapping gets no order.
+- **Safety.** Paper mode is the default for new accounts. Live accounts are dry-run (writes logged, not sent) until `LIVE_TRADING=true`. Before each order the server checks market hours, a daily order cap, the maximum value per order, and a kill switch that's flipped through the API, with no deploy.
+- **Billing (optional).** Plans with their limits stored as data, Razorpay subscriptions, and signature-verified idempotent webhooks with a grace period. With `BILLING_ENABLED=false`, every user is entitled. That suits one operator trading their own accounts.
+- **Analytics.** Execution quality compared across brokers: fill rate, slippage against the price at submission, time to fill, and rejection reasons. Also realised and unrealised P&L. All of it comes from separate analytics tables fed by an outbox, never from the live order tables.
+- **Audit.** `order_events` and `payment_events` are append-only (enforced by a database trigger) and keep the raw broker request and response, with credentials stripped.
 
 ## Quick start (local)
 
-Needs Node.js 24 or later.
+Needs Node.js 24 or later. No Postgres server is needed locally: `DATABASE_URL=pglite:./data/pg` runs Postgres in-process.
 
 ```bash
 npm install
-cp .env.example .env              # then set ENCRYPTION_KEY (openssl rand -base64 32), SIGNUP_CODE and MSG91_AUTH_KEY (or empty OTP_PROVIDER)
+cp .env.example .env     # then fill in ENCRYPTION_KEYS and JWT_PRIVATE_KEY (commands in the file)
 node --env-file=.env src/server.ts
 curl localhost:8080/health
 ```
 
-Node runs the TypeScript directly. `npm run build && npm start` runs the compiled JavaScript, as production does.
+Create a user and a client, then sign in. In development the OTP is printed to the console.
 
-## Deploy
+```bash
+node --env-file=.env src/cli.ts create-user 9876543210
+node --env-file=.env src/cli.ts create-client "NexoraApp iOS" ios
+```
 
-See [docs/deploy-fly.md](docs/deploy-fly.md). It covers Fly.io in the Singapore region with a static egress IP, a volume for the database, and secrets. It takes about 15 minutes and costs a few dollars a month.
+## Docs
 
-## API
-
-See [docs/api.md](docs/api.md). Every endpoint is JSON over HTTPS. Apart from health and sign-in, endpoints need `Authorization: Bearer <token>`.
-
-| Area | Endpoints |
-|---|---|
-| Health | `GET /health` |
-| Sign-in | `POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/otp/start`, `POST /v1/auth/otp/verify`, `POST /v1/auth/logout`, `POST /v1/auth/password`, `GET /v1/me` |
-| Accounts | `GET/POST /v1/accounts`, `GET/PATCH/DELETE /v1/accounts/:id` |
-| Broker login | `GET /v1/accounts/:id/login`, `POST/DELETE /v1/accounts/:id/session` |
-| Signals | `POST /v1/signals/parse`, `POST /v1/signals/execute` |
-| Activity | `GET/DELETE /v1/activity` |
-| Server | `GET /v1/server/ip`: the IP to register with your brokers |
+- [docs/api.md](docs/api.md): every endpoint, request and response.
+- [docs/architecture.md](docs/architecture.md): modules, the order lifecycle, the decisions taken, and what's still open.
+- [docs/deploy-fly.md](docs/deploy-fly.md): deploying to Fly.io with Postgres and a static egress IP.
 
 ## Configuration
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `ENCRYPTION_KEY` | required | 32 random bytes, base64. Encrypts broker secrets and tokens. **Back it up**: without it, stored secrets can't be read. |
-| `SIGNUP_CODE` | unset | Invite code for `POST /v1/auth/register`, and for a new number's first `POST /v1/auth/otp/start`. Unset closes sign-up; create users with the CLI instead. |
-| `OTP_PROVIDER` | unset | `msg91` turns on mobile + OTP sign-in, and then the server refuses to start without the two MSG91 settings below. Setting both also turns it on. |
-| `MSG91_AUTH_KEY` | unset | [MSG91](https://msg91.com) auth key. Secret: sent only to MSG91, never logged or returned. |
-| `MSG91_TEMPLATE_ID` | unset | MSG91 OTP template id (DLT-approved, with the `##OTP##` placeholder). |
-| `MSG91_OTP_LENGTH` | `6` | Digits in an SMS code (4–9). |
-| `MSG91_OTP_EXPIRY_MINUTES` | `5` | How long an SMS code stays valid (1–30). |
-| `LIVE_TRADING` | `false` | Must be `true` for live (non-paper) accounts to send real orders. |
-| `DATABASE_PATH` | `./data/nexora.db` | SQLite file. On Fly: `/data/nexora.db` on a volume. |
-| `PORT` / `HOST` | `8080` / `0.0.0.0` | Where to listen. |
-| `CORS_ORIGINS` | none | Web origins allowed to call the API, comma-separated. Only the Flutter web build needs this. |
-| `SESSION_DAYS` | `30` | How long a device stays signed in. |
-| `DUPLICATE_WINDOW_MINUTES` | `15` | How long a placed signal blocks a repeat on the same account. `0` turns the check off. |
-| `RATE_LIMIT_PER_MINUTE` | `300` | Requests per minute per client IP. |
-| `AUTH_RATE_LIMIT_PER_MINUTE` | `10` | Sign-in and sign-up attempts per minute per client IP. |
-| `LOG_LEVEL` | `info` | `fatal` … `trace`, or `silent`. |
+See [.env.example](.env.example) for every setting and its default. The ones that matter most:
 
-### Admin CLI
-
-```bash
-NEXORA_PASSWORD='a long password' node dist/cli.js create-user you@example.com
-node dist/cli.js gen-key          # prints a new ENCRYPTION_KEY
-```
-
-## Code layout
-
-Clean Architecture, mirroring the app:
-
-```
-src/
-  domain/      pure rules: signal parser, pricing, token expiry, IST dates, errors
-  brokers/     Kite, Upstox and Groww clients, and the MSG91 OTP client (fetch injected; no global state)
-  data/        SQLite (node:sqlite), repositories, encryption and password hashing
-  usecases/    auth (email + password, mobile + OTP), accounts + broker login, signal execution with the duplicate guard
-  http/        Fastify app, routes, request schemas (zod)
-  container.ts wires everything; server.ts and cli.ts are the entry points
-test/          mirrors src/; no test touches the network or a real broker
-```
+| Variable | Meaning |
+|---|---|
+| `DATABASE_URL` | `postgres://…` in production; `pglite:<dir>` or `pglite:memory` for development. |
+| `ENCRYPTION_KEYS` | `1:<base64>,2:<base64>`: 32-byte keys by version. New ciphertexts use `ENCRYPTION_KEY_VERSION` (default: the highest). **Back them up.** |
+| `JWT_PRIVATE_KEY` | Ed25519 private key (PEM) that signs access tokens. `node src/cli.ts gen-jwt-key`. |
+| `ADMIN_TOKEN` | Bearer token for `/admin/*`. Unset turns admin off. |
+| `LIVE_TRADING` | `false` (default): writes to live accounts are logged, not sent. |
+| `BILLING_ENABLED` | `false` (default): everyone may trade. `true` needs the Razorpay settings. |
+| `OTP_PROVIDER` | `msg91` in production; `console` prints codes (refused in production). |
 
 ## Development
 
@@ -105,8 +75,8 @@ npm test
 npm run coverage    # fails below 95% line coverage
 ```
 
-The rules for contributors (and for Claude Code) are in [CLAUDE.md](CLAUDE.md).
+Tests run against real Postgres semantics (PGlite in-process) and fake brokers. No test touches the network or a real broker. The rules for contributors (and for Claude Code) are in [CLAUDE.md](CLAUDE.md).
 
 ## Disclaimer
 
-This software places real orders when you turn off paper mode and set `LIVE_TRADING=true`. Options trading carries substantial risk, and you are responsible for every order the server places. Test with paper accounts first.
+This software places real orders when an account is live and `LIVE_TRADING=true`. Trading carries substantial risk, and you are responsible for every order the server places. Check the regulatory position (SEBI's algo framework, broker empanelment) before serving anyone other than yourself; see docs/architecture.md.

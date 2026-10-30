@@ -4,17 +4,21 @@ import { loadConfig } from './config.ts';
 import { createServices, realRuntime, type Runtime } from './container.ts';
 import { buildApp } from './http/app.ts';
 
-/** Starts the API on the configured host and port. Returns the running app. */
+/** Starts the API (and, unless turned off, the background jobs). Returns the running app. */
 export async function start(
   env: Record<string, string | undefined> = process.env,
   runtime: Runtime = realRuntime,
 ): Promise<FastifyInstance> {
   const config = loadConfig(env);
-  const services = createServices(config, runtime);
+  const services = await createServices(config, runtime);
   const app = await buildApp(services);
-  app.addHook('onClose', async () => services.db.close());
+  app.addHook('onClose', async () => {
+    await services.scheduler.stop();
+    await services.db.close();
+  });
   await app.listen({ port: config.PORT, host: config.HOST });
-  if (!config.LIVE_TRADING) app.log.warn('LIVE_TRADING is off: live accounts will not send real orders.');
+  if (config.JOBS_ENABLED) services.scheduler.start(1000);
+  if (!config.LIVE_TRADING) app.log.warn({ mode: 'dry_run' }, 'LIVE_TRADING is off: broker writes for live accounts are logged, not sent.');
   return app;
 }
 
@@ -25,6 +29,11 @@ export function closeOnSignals(app: FastifyInstance, signals: NodeJS.Signals[] =
   }
 }
 
-if (import.meta.main) {
-  closeOnSignals(await start());
+/** Starts the server and stops it cleanly on SIGINT/SIGTERM. */
+export async function main(env: Record<string, string | undefined> = process.env, runtime: Runtime = realRuntime): Promise<FastifyInstance> {
+  const app = await start(env, runtime);
+  closeOnSignals(app);
+  return app;
 }
+
+if (import.meta.main) await main();

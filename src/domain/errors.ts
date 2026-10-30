@@ -30,17 +30,9 @@ export class SignalParseError extends AppError {
   }
 }
 
-/** A broker API failure: HTTP error, rejected order, expired token. */
-export class BrokerApiError extends AppError {
-  constructor(message: string) {
-    super(502, 'broker_error', message);
-    this.name = 'BrokerApiError';
-  }
-}
-
-/** The SMS provider (MSG91) failed or refused to send (`otp_send_failed`) or check (`otp_verify_failed`) a code. */
+/** The SMS provider failed or refused to send a code. */
 export class OtpProviderError extends AppError {
-  constructor(code: 'otp_send_failed' | 'otp_verify_failed', message: string) {
+  constructor(code: 'otp_send_failed', message: string) {
     super(502, code, message);
     this.name = 'OtpProviderError';
   }

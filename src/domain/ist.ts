@@ -18,3 +18,19 @@ export function lastIstTime(now: Date, hour: number, minute: number): Date {
 export function istTime(at: Date): string {
   return new Date(at.getTime() + IST_OFFSET_MS).toISOString().slice(11, 16);
 }
+
+/** The next moment (strictly after [now]) the IST clock reads [hour]:[minute]. */
+export function nextIstTime(now: Date, hour: number, minute: number): Date {
+  return new Date(lastIstTime(now, hour, minute).getTime() + 24 * 60 * 60 * 1000);
+}
+
+/** Day of the week in India at [at]: 0 = Sunday … 6 = Saturday. */
+export function istWeekday(at: Date): number {
+  return new Date(at.getTime() + IST_OFFSET_MS).getUTCDay();
+}
+
+/** Minutes since midnight in India at [at]. */
+export function istMinutes(at: Date): number {
+  const ist = new Date(at.getTime() + IST_OFFSET_MS);
+  return ist.getUTCHours() * 60 + ist.getUTCMinutes();
+}

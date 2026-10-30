@@ -1,52 +1,62 @@
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
+
 import { loadConfig } from './config.ts';
 import { createServices } from './container.ts';
 import { e164 } from './domain/phone.ts';
 
 const USAGE = `Usage:
-  node dist/cli.js create-user <email>       (password from NEXORA_PASSWORD)
-  node dist/cli.js create-phone-user <mobile> (signs in with an SMS code)
-  node dist/cli.js gen-key                   (prints a new ENCRYPTION_KEY)`;
+  node dist/cli.js gen-key                     prints a new encryption key
+  node dist/cli.js gen-jwt-key                 prints a new Ed25519 private key (PEM) for JWT_PRIVATE_KEY
+  node dist/cli.js create-user <mobile> [email]
+  node dist/cli.js create-client <name> <web|ios|android|partner|other>
+  node dist/cli.js migrate                     applies database migrations and exits`;
 
 /**
  * Server admin commands. Returns the text to print; throws with a message on
  * failure. Kept free of process I/O so it can be tested.
  */
 export async function runCli(args: string[], env: Record<string, string | undefined>): Promise<string> {
-  const [command, arg] = args;
-  if (command === 'gen-key') {
-    const { randomBytes } = await import('node:crypto');
-    return randomBytes(32).toString('base64');
+  const [command, a, b] = args;
+  if (command === 'gen-key') return randomBytes(32).toString('base64');
+  if (command === 'gen-jwt-key') {
+    return generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   }
-  if (command === 'create-user') {
-    if (!arg) throw new Error(USAGE);
-    const password = env['NEXORA_PASSWORD'];
-    if (!password) throw new Error('Set NEXORA_PASSWORD to the new user\'s password.');
-    const services = createServices(loadConfig(env));
-    try {
-      const user = await services.auth.createUser(arg, password);
-      return `Created user ${user.email} (${user.id}).`;
-    } finally {
-      services.db.close();
+  if (command !== 'create-user' && command !== 'create-client' && command !== 'migrate') throw new Error(USAGE);
+  if (command !== 'migrate' && !a) throw new Error(USAGE);
+  const services = await createServices(loadConfig(env));
+  try {
+    if (command === 'migrate') return 'Database is up to date.';
+    if (command === 'create-user') {
+      const user = await services.identity.registerUser({ phone: a!, email: b ?? null });
+      return `Created user ${e164(user.phone)} (${user.id}).`;
     }
+    const platform = (b ?? 'other') as 'web' | 'ios' | 'android' | 'partner' | 'other';
+    const client = await services.identity.registerClient({
+      name: a!,
+      platform,
+      grantTypes: ['otp', 'refresh_token'],
+      accessTtlSeconds: 900,
+      refreshTtlSeconds: platform === 'web' ? 7 * 86_400 : 90 * 86_400,
+    });
+    return `Created client ${client.name} (${client.id}).`;
+  } finally {
+    await services.db.close();
   }
-  if (command === 'create-phone-user') {
-    if (!arg) throw new Error(USAGE);
-    const services = createServices(loadConfig(env));
-    try {
-      const user = services.auth.createPhoneUser(arg);
-      return `Created user ${e164(user.phone!)} (${user.id}).`;
-    } finally {
-      services.db.close();
-    }
-  }
-  throw new Error(USAGE);
 }
 
-if (import.meta.main) {
+/** Runs a command and returns the process exit code; output goes through [io]. */
+export async function main(
+  args: string[],
+  env: Record<string, string | undefined>,
+  io: { out: (line: string) => void; err: (line: string) => void },
+): Promise<number> {
   try {
-    console.log(await runCli(process.argv.slice(2), process.env));
+    io.out(await runCli(args, env));
+    return 0;
   } catch (e) {
-    console.error(e instanceof Error ? e.message : e);
-    process.exit(1);
+    io.err(e instanceof Error ? e.message : String(e));
+    return 1;
   }
 }
+
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2), process.env, { out: console.log, err: console.error });
