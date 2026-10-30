@@ -16,22 +16,32 @@ Put your app's name in `fly.toml` (`app = "…"`) and set `PUBLIC_URL` there to 
 
 ## 2. Create the database
 
-Use Postgres 16 in or near Singapore. Either option works:
+Use Postgres 16 in Singapore, next to the app: every order makes several database round trips.
 
-- **Fly Managed Postgres:** `fly mpg create --region sin`, then `fly mpg attach <cluster> -a <your-app>`. This sets `DATABASE_URL` for you.
-- **Any hosted Postgres** (Neon, Supabase, RDS in `ap-southeast-1` or `ap-south-1`): `fly secrets set DATABASE_URL="postgres://user:pass@host/db?sslmode=require"`.
+```bash
+fly mpg create --name nexora-backend-db --region sin --plan basic --org <your-org>
+fly mpg status <cluster-id>          # shows the "Direct IP" host
+```
 
-The server applies its migrations on start, under an advisory lock.
+Set `DATABASE_URL` to the cluster's **direct** host, not the PgBouncer one that `fly mpg create` prints and `fly mpg attach` sets. PgBouncer pools by transaction, which breaks the session-level advisory locks that stop two exits on the same order from running at once. Take the user, password and database from the printed connection string:
+
+```bash
+fly secrets set --stage DATABASE_URL="postgres://fly-user:<password>@direct.<cluster-id>.flympg.net:5432/fly-db"
+```
+
+Any other hosted Postgres works too (Neon, Supabase, RDS in `ap-southeast-1`), as long as the connection isn't through a transaction-pooling proxy. The server applies its migrations on start, under an advisory lock.
 
 ## 3. Set the secrets
 
 ```bash
-fly secrets set ENCRYPTION_KEYS="1:$(openssl rand -base64 32)"
-fly secrets set JWT_PRIVATE_KEY="$(node src/cli.ts gen-jwt-key | base64)"
-fly secrets set ADMIN_TOKEN="$(openssl rand -hex 32)"
+fly secrets set --stage ENCRYPTION_KEYS="1:$(openssl rand -base64 32)"
+fly secrets set --stage JWT_PRIVATE_KEY="$(node src/cli.ts gen-jwt-key | base64)"
+fly secrets set --stage ADMIN_TOKEN="$(openssl rand -hex 32)"
 fly secrets set MSG91_AUTH_KEY="your-msg91-auth-key" MSG91_TEMPLATE_ID="your-dlt-template-id"
 ```
 
+- `--stage` stores a secret without restarting the running machine; it takes effect at the next deploy.
+- An existing `ENCRYPTION_KEY` (from 1.x) keeps working: it's read as key version 1. Don't set `ENCRYPTION_KEYS` as well unless you mean to rotate.
 - **Keep a copy of `ENCRYPTION_KEYS` and `ADMIN_TOKEN`** in a password manager. You can't read them back from Fly, and without the encryption keys every stored broker credential is unreadable.
 - The MSG91 template must carry the `##OTP##` placeholder. If your MSG91 key is locked to IPs, add the egress IP from step 4.
 - For the Flutter web build: `fly secrets set CORS_ORIGINS="https://your-web-app.example.com"`.
