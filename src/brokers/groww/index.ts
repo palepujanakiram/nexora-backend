@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
 
 import { BrokerError, classifyMessage, type BrokerErrorCode } from '../../domain/broker-error.ts';
-import type { BrokerSymbol, Exchange, InstrumentType } from '../../domain/instrument.ts';
 import { nextIstTime } from '../../domain/ist.ts';
 import { brokerRupeesToPaise, rupeeNumber } from '../../domain/money.ts';
-import { needsTrigger, type LegStatus, type OrderType, type Product } from '../../domain/order.ts';
+import { needsTrigger, type OrderType, type Product } from '../../domain/order.ts';
 import {
   standardModifyProblem,
   type AccountContext,
@@ -22,6 +21,9 @@ import {
   type TokenSet,
 } from '../adapter.ts';
 import { objectOf, parseCsv, type HttpRequest, type HttpResult } from '../http.ts';
+import { SEGMENTS, splitExchange, splitOrderId, toInstrument, toOrder, type Segment } from './mapping.ts';
+
+export { SEGMENTS, growwStatus, splitExchange, splitOrderId } from './mapping.ts';
 
 /*
  * Groww Trade API. Docs: https://groww.in/trade-api/docs/curl
@@ -34,22 +36,9 @@ export const GROWW_BASE = 'https://api.groww.in';
 export const GROWW_API_KEYS_PAGE = 'https://groww.in/trade-api/api-keys';
 export const GROWW_INSTRUMENTS_URL = 'https://growwapi-assets.groww.in/instruments/instrument.csv';
 
-/** Groww splits orders by segment; every order call needs one. */
-export const SEGMENTS = ['FNO', 'CASH'] as const;
-type Segment = (typeof SEGMENTS)[number];
-
 const PRODUCT: Record<Product, string> = { DELIVERY: 'CNC', INTRADAY: 'MIS', CARRYFORWARD: 'NRML' };
 const PRODUCT_BACK: Record<string, Product> = { CNC: 'DELIVERY', MIS: 'INTRADAY', NRML: 'CARRYFORWARD' };
 const ORDER_TYPE: Record<OrderType, string> = { MARKET: 'MARKET', LIMIT: 'LIMIT', SL: 'SL', SL_M: 'SL_M' };
-const ORDER_TYPE_BACK: Record<string, OrderType> = { MARKET: 'MARKET', LIMIT: 'LIMIT', SL: 'SL', SL_M: 'SL_M' };
-const TYPES = new Set<string>(['EQ', 'FUT', 'CE', 'PE']);
-/** Groww exchange + segment → our exchange. Other combinations aren't traded here. */
-const EXCHANGE_OF: Record<string, Exchange> = {
-  'NSE:CASH': 'NSE',
-  'BSE:CASH': 'BSE',
-  'NSE:FNO': 'NFO',
-  'BSE:FNO': 'BFO',
-};
 
 const CAPABILITIES: Capabilities = {
   orderTypes: ['MARKET', 'LIMIT', 'SL', 'SL_M'],
@@ -61,62 +50,6 @@ const CAPABILITIES: Capabilities = {
   headlessRefresh: false,
   webhooks: false,
 };
-
-/**
- * Groww's order status → ours. Unrecognised in-flight states stay SUBMITTED so
- * reconciliation keeps checking.
- */
-export function growwStatus(status: string, filled: number, quantity: number): LegStatus {
-  switch (status.toUpperCase()) {
-    case 'EXECUTED':
-      // TODO(verify): whether Groww reports EXECUTED for a partly filled order, or only once fully filled.
-      return quantity > 0 && filled < quantity ? 'PARTIALLY_FILLED' : 'FILLED';
-    case 'COMPLETED':
-      return 'FILLED';
-    case 'CANCELLED':
-      return 'CANCELLED';
-    case 'REJECTED':
-    case 'FAILED':
-      return 'REJECTED';
-    case 'NEW':
-    case 'ACKED':
-    case 'OPEN':
-    case 'TRIGGER_PENDING':
-    case 'APPROVED':
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'OPEN';
-    default:
-      // CANCELLATION_REQUESTED, MODIFICATION_REQUESTED, DELIVERY_AWAITED, and anything new.
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'SUBMITTED';
-  }
-}
-
-/**
- * Groww needs the segment on modify, cancel and status calls, but the core only
- * hands those calls a broker order id. So the id we return from placeOrder (and
- * listOrders) is `<SEGMENT>:<groww_order_id>`, e.g. `FNO:GLTFO123`, and it is
- * split again here.
- */
-export function splitOrderId(brokerOrderId: string): { segment: Segment; id: string } {
-  const at = brokerOrderId.indexOf(':');
-  const segment = brokerOrderId.slice(0, at);
-  const id = brokerOrderId.slice(at + 1);
-  if (at < 0 || !(SEGMENTS as readonly string[]).includes(segment) || !id) {
-    throw new BrokerError('NOT_FOUND', `Not a Groww order id: ${brokerOrderId}.`);
-  }
-  return { segment: segment as Segment, id };
-}
-
-/**
- * Groww names a market by exchange and segment, so BrokerSymbol.exchange holds
- * both, e.g. `NSE:FNO` or `BSE:CASH`. The core passes it through untouched.
- */
-export function splitExchange(symbol: BrokerSymbol): { exchange: string; segment: Segment } {
-  const [exchange = '', segment = ''] = symbol.exchange.split(':');
-  if (!EXCHANGE_OF[`${exchange}:${segment}`]) {
-    throw new BrokerError('INVALID_SYMBOL', `Groww can't trade on ${symbol.exchange}.`);
-  }
-  return { exchange, segment: segment as Segment };
-}
 
 export class GrowwAdapter implements BrokerAdapter {
   readonly code = 'groww';
@@ -179,26 +112,7 @@ export class GrowwAdapter implements BrokerAdapter {
     if (!ctx) throw new BrokerError('UNKNOWN', 'Groww\'s instrument download needs an http client.');
     const res = await ctx.http.send({ kind: 'read', method: 'GET', url: GROWW_INSTRUMENTS_URL });
     if (res.status !== 200) throw this.error(res, 'read');
-    const out: BrokerInstrument[] = [];
-    for (const r of parseCsv(res.text)) {
-      const marketKey = `${r['exchange'] ?? ''}:${r['segment'] ?? ''}`;
-      const exchange = EXCHANGE_OF[marketKey];
-      const type = r['instrument_type'] ?? '';
-      if (!exchange || !TYPES.has(type)) continue;
-      const derivative = type !== 'EQ';
-      const tradingSymbol = r['trading_symbol']!;
-      out.push({
-        exchange,
-        type: type as InstrumentType,
-        underlying: derivative ? r['underlying_symbol']! : tradingSymbol,
-        expiry: derivative ? r['expiry_date'] || null : null,
-        strikePaise: type === 'CE' || type === 'PE' ? brokerRupeesToPaise(r['strike_price']) : null,
-        lotSize: Number(r['lot_size']) || 1,
-        tickPaise: brokerRupeesToPaise(r['tick_size']) || 5,
-        symbol: { nativeId: tradingSymbol, tradingSymbol, exchange: marketKey },
-      });
-    }
-    return out;
+    return parseCsv(res.text).flatMap((r) => toInstrument(r) ?? []);
   }
 
   async placeOrder(ctx: AccountContext, req: PlaceRequest): Promise<BrokerAck> {
@@ -320,23 +234,4 @@ export class GrowwAdapter implements BrokerAdapter {
     else code = classifyMessage(message) ?? (res.status === 400 && kind === 'write' ? 'REJECTED_BY_EXCHANGE' : 'UNKNOWN');
     return new BrokerError(code, `Groww: ${message}`, res.raw);
   }
-}
-
-function toOrder(r: Record<string, unknown>, segment: Segment): BrokerOrder {
-  // TODO(verify): field names of Groww's order detail / order list rows.
-  const filled = Number(r['filled_quantity']) || 0;
-  const quantity = Number(r['quantity']) || 0;
-  return {
-    brokerOrderId: `${segment}:${String(r['groww_order_id'])}`,
-    status: growwStatus(String(r['order_status'] ?? ''), filled, quantity),
-    quantity,
-    filledQty: filled,
-    avgPricePaise: filled > 0 ? brokerRupeesToPaise(r['average_fill_price']) : null,
-    pricePaise: brokerRupeesToPaise(r['price']) || null,
-    triggerPaise: brokerRupeesToPaise(r['trigger_price']) || null,
-    orderType: ORDER_TYPE_BACK[String(r['order_type'])] ?? null,
-    clientRef: typeof r['order_reference_id'] === 'string' ? r['order_reference_id'] : null,
-    message: typeof r['remark'] === 'string' ? r['remark'] : null,
-    raw: r,
-  };
 }

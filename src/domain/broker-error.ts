@@ -42,13 +42,17 @@ export class BrokerError extends Error {
   }
 }
 
-/** Common phrases in broker rejection messages, checked after broker-specific codes. */
+/** Common phrases in broker rejection messages, checked in order after broker-specific codes. */
+const MESSAGE_CODES: readonly [RegExp, BrokerErrorCode][] = [
+  [/insufficient|margin (?:shortfall|exceeds|required)|not enough (?:funds|margin)|fund/, 'INSUFFICIENT_FUNDS'],
+  [/market (?:is )?closed|markets are closed|outside (?:market|trading) hours|after market/, 'MARKET_CLOSED'],
+  [/too many requests|rate limit|exceeding access rate|throttl/, 'RATE_LIMITED'],
+  [/invalid (?:access )?token|token (?:is )?(?:invalid|expired)|session expired|unauthori[sz]ed|invalid session/, 'AUTH_EXPIRED'],
+  [/invalid (?:symbol|instrument|tradingsymbol|scrip)|instrument (?:not found|expired)|symbol not found/, 'INVALID_SYMBOL'],
+];
+
+/** The taxonomy code a broker's message points to, or null. */
 export function classifyMessage(message: string): BrokerErrorCode | null {
   const m = message.toLowerCase();
-  if (/insufficient|margin (?:shortfall|exceeds|required)|not enough (?:funds|margin)|fund/.test(m)) return 'INSUFFICIENT_FUNDS';
-  if (/market (?:is )?closed|markets are closed|outside (?:market|trading) hours|after market/.test(m)) return 'MARKET_CLOSED';
-  if (/too many requests|rate limit|exceeding access rate|throttl/.test(m)) return 'RATE_LIMITED';
-  if (/invalid (?:access )?token|token (?:is )?(?:invalid|expired)|session expired|unauthori[sz]ed|invalid session/.test(m)) return 'AUTH_EXPIRED';
-  if (/invalid (?:symbol|instrument|tradingsymbol|scrip)|instrument (?:not found|expired)|symbol not found/.test(m)) return 'INVALID_SYMBOL';
-  return null;
+  return MESSAGE_CODES.find(([pattern]) => pattern.test(m))?.[1] ?? null;
 }

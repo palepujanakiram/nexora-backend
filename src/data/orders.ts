@@ -197,7 +197,7 @@ export class OrderRepository {
             l.reconcileAt, l.reconcileAttempts, l.submittedAt, l.terminalAt, l.createdAt, l.updatedAt,
           ],
         );
-        await this.event(tx, l.id, l.parentOrderId, null, l.status, { action: 'create', source: 'api', raw: null }, l.createdAt);
+        await this.event(tx, { leg: l, from: null, to: l.status, event: { action: 'create', source: 'api', raw: null }, at: l.createdAt });
         if (isTerminal(l.status)) await this.outbox(tx, parent, l, l.createdAt);
       }
       await this.refreshParent(tx, parent.id, parent.createdAt);
@@ -227,7 +227,7 @@ export class OrderRepository {
         sets.push(`${column} = $${values.length}`);
       }
       await tx.query(`UPDATE order_legs SET ${sets.join(', ')} WHERE id = $1`, values);
-      await this.event(tx, legId, before.parentOrderId, before.status, after.status, event, now);
+      await this.event(tx, { leg: before, from: before.status, to: after.status, event, at: now });
       if (becameTerminal) {
         const [p] = await tx.query('SELECT * FROM parent_orders WHERE id = $1', [before.parentOrderId]);
         await this.outbox(tx, toParent(p!), after, now);
@@ -244,7 +244,7 @@ export class OrderRepository {
 
   /** Records an action on a leg that didn't change its state (a refused cancel, a modify request). */
   async note(leg: Leg, event: LegEvent, now: Date): Promise<void> {
-    await this.event(this.db, leg.id, leg.parentOrderId, leg.status, leg.status, event, now);
+    await this.event(this.db, { leg, from: leg.status, to: leg.status, event, at: now });
   }
 
   async parent(id: string): Promise<ParentOrder | null> {
@@ -371,15 +371,16 @@ export class OrderRepository {
 
   // Internals ----------------------------------------------------------------
 
-  private async event(q: Queryable, legId: string, parentId: string, from: LegStatus | null, to: LegStatus, e: LegEvent, at: Date) {
+  private async event(q: Queryable, r: { leg: Pick<Leg, 'id' | 'parentOrderId'>; from: LegStatus | null; to: LegStatus; event: LegEvent; at: Date }) {
+    const { raw } = r.event;
     await q.query(
       `INSERT INTO order_events (leg_id, parent_order_id, action, from_status, to_status, source, raw_request, raw_response, at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
-        legId, parentId, e.action, from, to, e.source,
-        e.raw ? JSON.stringify(e.raw.request) : null,
-        e.raw?.response ? JSON.stringify(e.raw.response) : null,
-        at,
+        r.leg.id, r.leg.parentOrderId, r.event.action, r.from, r.to, r.event.source,
+        raw ? JSON.stringify(raw.request) : null,
+        raw?.response ? JSON.stringify(raw.response) : null,
+        r.at,
       ],
     );
   }

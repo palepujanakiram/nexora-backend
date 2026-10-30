@@ -8,6 +8,7 @@ import {
   type BrokerPosition,
   type Credentials,
   type ModifyRequest,
+  type NeedsUserAction,
   type PlaceRequest,
   type TokenSet,
 } from '../brokers/adapter.ts';
@@ -148,27 +149,31 @@ export class BrokerGateway {
    * the user. Returns true when the account has a usable session.
    */
   async ensureSession(account: BrokerAccountRecord): Promise<boolean> {
-    if (account.mode === 'paper') return true;
-    const now = this.d.clock();
-    if (account.tokenEnc && account.tokenExpiresAt && account.tokenExpiresAt > now) return true;
+    if (account.mode === 'paper' || hasLiveSession(account, this.d.clock())) return true;
     const adapter = this.adapterFor(account);
     if (!account.tokenEnc || !adapter.capabilities.headlessRefresh) {
       await this.needsRelink(account, `${adapter.label}: log in again to trade on this account.`);
       return false;
     }
+    return this.refreshHeadless(account, adapter);
+  }
+
+  /** Renews a session without the user (Angel One). False when the broker wants the user, or the refresh failed. */
+  private async refreshHeadless(account: BrokerAccountRecord, adapter: BrokerAdapter): Promise<boolean> {
+    let result: TokenSet | NeedsUserAction;
     try {
-      const result = await adapter.refreshSession(this.context(account, adapter));
-      if (needsUserAction(result)) {
-        await this.needsRelink(account, result.reason);
-        return false;
-      }
-      await this.saveToken(account.id, result);
-      return true;
+      result = await adapter.refreshSession(this.context(account, adapter));
     } catch (e) {
       this.d.log.warn({ accountId: account.id, broker: account.broker, code: (e as BrokerError).code }, 'session refresh failed');
       await this.d.accounts.setTokenState(account.id, 'expired', 'Session refresh failed; it will be retried.');
       return false;
     }
+    if (needsUserAction(result)) {
+      await this.needsRelink(account, result.reason);
+      return false;
+    }
+    await this.saveToken(account.id, result);
+    return true;
   }
 
   async place(accountId: string, req: PlaceRequest): Promise<BrokerAck> {
@@ -205,7 +210,7 @@ export class BrokerGateway {
     const adapter = this.d.registry.get(broker);
     const now = this.d.clock();
     const accounts = (await this.d.accounts.listAll()).filter(
-      (a) => a.broker === broker && a.mode === 'live' && a.tokenEnc && a.tokenExpiresAt && a.tokenExpiresAt > now,
+      (a) => a.broker === broker && a.mode === 'live' && hasLiveSession(a, now),
     );
     if (adapter.instrumentsNeedSession && accounts.length === 0) {
       throw new BrokerError('AUTH_EXPIRED', `${adapter.label} needs a logged-in account to download instruments.`);
@@ -243,4 +248,9 @@ export class BrokerGateway {
       throw e;
     }
   }
+}
+
+/** Whether [account] holds a session that hasn't expired at [now]. */
+function hasLiveSession(account: BrokerAccountRecord, now: Date): boolean {
+  return account.tokenEnc !== null && account.tokenExpiresAt !== null && account.tokenExpiresAt > now;
 }

@@ -32,24 +32,40 @@ export class Scheduler {
     const now = this.d.clock();
     const ran: string[] = [];
     for (const job of this.d.jobs) {
-      if (job.everyMs !== undefined) {
-        const last = this.lastRun.get(job.name) ?? 0;
-        if (now.getTime() - last < job.everyMs) continue;
-        this.lastRun.set(job.name, now.getTime());
-        if (await this.runLocked(job)) ran.push(job.name);
-      } else if (job.dailyAt) {
-        const [h, m] = job.dailyAt;
-        const today = istDate(now);
-        if (istMinutes(now) < h * 60 + m) continue;
-        const state = await this.d.settings.jobState<{ day: string }>(job.name);
-        if (state?.day === today) continue;
-        // A failed daily job is retried, but not more than every 10 minutes.
-        if (now.getTime() - (this.lastRun.get(job.name) ?? 0) < 10 * 60_000) continue;
-        this.lastRun.set(job.name, now.getTime());
-        if (await this.runLocked(job, async () => this.d.settings.setJobState(job.name, { day: today }, this.d.clock()))) ran.push(job.name);
-      }
+      const due = await this.due(job, now);
+      if (!due) continue;
+      this.lastRun.set(job.name, now.getTime());
+      if (await this.runLocked(job, due.after)) ran.push(job.name);
     }
     return ran;
+  }
+
+  /** Whether [job] should run now, and what to record after it succeeds. A job with no schedule never runs. */
+  private async due(job: Job, now: Date): Promise<{ after?: () => Promise<void> } | null> {
+    if (job.everyMs !== undefined) return this.intervalDue(job, job.everyMs, now);
+    return job.dailyAt ? this.dailyDue(job, job.dailyAt, now) : null;
+  }
+
+  /** Due when [everyMs] has passed since the last run. */
+  private intervalDue(job: Job, everyMs: number, now: Date): { after?: () => Promise<void> } | null {
+    return now.getTime() - this.sinceLastRun(job) >= everyMs ? {} : null;
+  }
+
+  /**
+   * Due once its IST time has passed and it hasn't succeeded today. A failed
+   * daily job is retried, but not more than every 10 minutes. After a
+   * success, today is recorded so other processes and restarts skip it.
+   */
+  private async dailyDue(job: Job, [h, m]: readonly [number, number], now: Date): Promise<{ after: () => Promise<void> } | null> {
+    const today = istDate(now);
+    if (istMinutes(now) < h * 60 + m) return null;
+    if ((await this.d.settings.jobState<{ day: string }>(job.name))?.day === today) return null;
+    if (now.getTime() - this.sinceLastRun(job) < 10 * 60_000) return null;
+    return { after: () => this.d.settings.setJobState(job.name, { day: today }, this.d.clock()) };
+  }
+
+  private sinceLastRun(job: Job): number {
+    return this.lastRun.get(job.name) ?? 0;
   }
 
   /** Checks for due jobs every [tickMs] until [stop]. */

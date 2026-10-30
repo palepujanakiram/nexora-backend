@@ -14,6 +14,12 @@ const page = (title: string, body: string) =>
 
 const escapeHtml = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
+/** The page shown when the broker's redirect couldn't finish the link. Unexpected errors don't show their message. */
+function failurePage(e: unknown): { status: number; html: string } {
+  if (e instanceof AppError) return { status: e.status, html: page('Linking failed', escapeHtml(e.message)) };
+  return { status: 500, html: page('Linking failed', 'Something went wrong. Try again from the app.') };
+}
+
 /** Linked broker accounts. */
 export const brokerAccountRoutes =
   ({ brokerAccounts }: Services): FastifyPluginAsync =>
@@ -58,9 +64,9 @@ export const brokerPublicRoutes =
         const account = await brokerAccounts.callback(request.params.broker, request.query);
         return page('Account linked', `${escapeHtml(account.label)} is ready to trade. You can close this page and return to the app.`);
       } catch (e) {
-        const status = e instanceof AppError ? e.status : 500;
-        if (status >= 500) request.log.error({ err: e }, 'broker callback failed');
-        return reply.status(status).send(page('Linking failed', escapeHtml(e instanceof AppError ? e.message : 'Something went wrong. Try again from the app.')));
+        const failed = failurePage(e);
+        if (failed.status >= 500) request.log.error({ err: e }, 'broker callback failed');
+        return reply.status(failed.status).send(failed.html);
       }
     });
 

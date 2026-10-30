@@ -1,5 +1,5 @@
 import type { BrokerOrder } from '../brokers/adapter.ts';
-import type { EventSource, Leg, LegPatch, OrderRepository } from '../data/orders.ts';
+import type { EventSource, Leg, LegEvent, LegPatch, OrderRepository } from '../data/orders.ts';
 import { BrokerError, classifyMessage, type RawExchange } from '../domain/broker-error.ts';
 import { rupees } from '../domain/money.ts';
 import { isTerminal } from '../domain/order.ts';
@@ -59,13 +59,12 @@ export class LegTracker {
     return new Date(this.d.clock().getTime() + delay);
   }
 
-  /** Applies [patch] with an audit event, tells the user's devices, and returns the new leg. */
-  async update(leg: Leg, patch: LegPatch, action: string, source: EventSource, raw: RawExchange | null, userId: string): Promise<Leg> {
-    const now = this.d.clock();
-    const updated = await this.d.orders.updateLeg(leg.id, patch, { action, source, raw }, now);
+  /** Applies [patch] with the audit [event], tells the user's devices, and returns the new leg. */
+  async update(leg: Leg, patch: LegPatch, event: LegEvent, userId: string): Promise<Leg> {
+    const updated = await this.d.orders.updateLeg(leg.id, patch, event, this.d.clock());
     if (updated.status !== leg.status) {
       this.d.log.info(
-        { parentOrderId: leg.parentOrderId, legId: leg.id, accountId: leg.accountId, broker: leg.broker, fromStatus: leg.status, toStatus: updated.status, op: action },
+        { parentOrderId: leg.parentOrderId, legId: leg.id, accountId: leg.accountId, broker: leg.broker, fromStatus: leg.status, toStatus: updated.status, op: event.action },
         'leg status changed',
       );
     }
@@ -75,9 +74,9 @@ export class LegTracker {
   }
 
   /** Writes what the broker reports about the order into the leg. */
-  async apply(leg: Leg, bo: BrokerOrder, action: string, source: EventSource, userId: string): Promise<Leg> {
+  async apply(leg: Leg, bo: BrokerOrder, source: EventSource, userId: string): Promise<Leg> {
     const terminal = isTerminal(bo.status);
-    const patch: LegPatch = {
+    const reported: LegPatch = {
       brokerOrderId: bo.brokerOrderId,
       status: bo.status,
       filledQty: bo.filledQty,
@@ -85,27 +84,20 @@ export class LegTracker {
       quantity: bo.quantity || leg.quantity,
       pricePaise: bo.pricePaise,
       triggerPaise: bo.triggerPaise,
+    };
+    const schedule = {
       reconcileAt: terminal ? null : this.nextCheck(leg.reconcileAttempts),
       reconcileAttempts: terminal ? leg.reconcileAttempts : leg.reconcileAttempts + 1,
     };
-    if (bo.orderType) patch.orderType = bo.orderType;
-    if (bo.status === 'REJECTED') {
-      patch.errorCode = classifyMessage(bo.message ?? '') ?? 'REJECTED_BY_EXCHANGE';
-      patch.errorMessage = bo.message ?? 'Rejected by the broker.';
-    } else if (leg.status === 'UNKNOWN') {
-      patch.errorCode = null;
-      patch.errorMessage = null;
+    const changed = (Object.keys(reported) as (keyof LegPatch)[]).some((k) => reported[k] !== leg[k]);
+    if (!changed) {
+      await this.d.orders.scheduleReconcile(leg.id, schedule.reconcileAt, schedule.reconcileAttempts);
+      return { ...leg, ...schedule };
     }
     const raw: RawExchange = { request: { method: 'GET', url: `${leg.broker}:order/${bo.brokerOrderId}`, body: null }, response: { status: 200, body: bo.raw } };
-    const changed =
-      bo.status !== leg.status || bo.filledQty !== leg.filledQty || bo.avgPricePaise !== leg.avgPricePaise ||
-      bo.brokerOrderId !== leg.brokerOrderId || (bo.quantity || leg.quantity) !== leg.quantity ||
-      bo.pricePaise !== leg.pricePaise || bo.triggerPaise !== leg.triggerPaise;
-    if (!changed) {
-      await this.d.orders.scheduleReconcile(leg.id, patch.reconcileAt ?? null, patch.reconcileAttempts!);
-      return { ...leg, reconcileAt: patch.reconcileAt ?? null, reconcileAttempts: patch.reconcileAttempts! };
-    }
-    return this.update(leg, patch, action, source, raw, userId);
+    const patch: LegPatch = { ...reported, ...schedule, ...errorFields(leg, bo) };
+    if (bo.orderType) patch.orderType = bo.orderType;
+    return this.update(leg, patch, { action: 'reconcile', source, raw }, userId);
   }
 
   /**
@@ -116,23 +108,9 @@ export class LegTracker {
    */
   async refresh(leg: Leg, source: EventSource, userId: string): Promise<Leg> {
     if (isTerminal(leg.status)) return leg;
+    let found: BrokerOrder | undefined;
     try {
-      if (leg.brokerOrderId) {
-        return await this.apply(leg, await this.d.gateway.getOrder(leg.accountId, leg.brokerOrderId), 'reconcile', source, userId);
-      }
-      const match = (await this.d.gateway.listOrders(leg.accountId)).find((o) => o.clientRef === leg.clientRef);
-      if (match) return await this.apply(leg, match, 'reconcile', source, userId);
-      if (leg.reconcileAttempts + 1 >= this.d.maxUnknownAttempts) {
-        return await this.update(
-          leg,
-          { status: 'REJECTED', errorCode: 'NOT_FOUND', errorMessage: 'The broker has no record of this order, so it was not placed.' },
-          'reconcile',
-          source,
-          null,
-          userId,
-        );
-      }
-      return await this.reschedule(leg);
+      found = await this.lookup(leg);
     } catch (e) {
       this.d.log.warn(
         { legId: leg.id, accountId: leg.accountId, broker: leg.broker, code: e instanceof BrokerError ? e.code : 'INTERNAL', attempt: leg.reconcileAttempts },
@@ -140,6 +118,16 @@ export class LegTracker {
       );
       return this.reschedule(leg);
     }
+    if (found) return this.apply(leg, found, source, userId);
+    if (leg.reconcileAttempts + 1 < this.d.maxUnknownAttempts) return this.reschedule(leg);
+    const notPlaced = { status: 'REJECTED' as const, errorCode: 'NOT_FOUND', errorMessage: 'The broker has no record of this order, so it was not placed.' };
+    return this.update(leg, notPlaced, { action: 'reconcile', source, raw: null }, userId);
+  }
+
+  /** The broker's view of [leg]: by its order id, or by our client reference in the order book. */
+  private async lookup(leg: Leg): Promise<BrokerOrder | undefined> {
+    if (leg.brokerOrderId) return this.d.gateway.getOrder(leg.accountId, leg.brokerOrderId);
+    return (await this.d.gateway.listOrders(leg.accountId)).find((o) => o.clientRef === leg.clientRef);
   }
 
   private async reschedule(leg: Leg): Promise<Leg> {
@@ -147,4 +135,12 @@ export class LegTracker {
     await this.d.orders.scheduleReconcile(leg.id, at, leg.reconcileAttempts + 1);
     return { ...leg, reconcileAt: at, reconcileAttempts: leg.reconcileAttempts + 1 };
   }
+}
+
+/** A rejection's reason, or clearing the error an UNKNOWN leg carried once the broker has answered. */
+function errorFields(leg: Leg, bo: BrokerOrder): LegPatch {
+  if (bo.status === 'REJECTED') {
+    return { errorCode: classifyMessage(bo.message ?? '') ?? 'REJECTED_BY_EXCHANGE', errorMessage: bo.message ?? 'Rejected by the broker.' };
+  }
+  return leg.status === 'UNKNOWN' ? { errorCode: null, errorMessage: null } : {};
 }

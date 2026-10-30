@@ -4,6 +4,7 @@ import { newId, type SecretBox } from '../data/crypto.ts';
 import { BrokerError } from '../domain/broker-error.ts';
 import { AppError, badRequest, conflict, notFound } from '../domain/errors.ts';
 import type { Log } from '../logging.ts';
+import { accountView, credentialsFrom, decodeState, encodeState, flatten } from './account-rules.ts';
 import type { EntitlementService } from './entitlements.ts';
 import type { BrokerGateway } from './gateway.ts';
 
@@ -25,8 +26,6 @@ export interface BrokerAccountDeps {
   /** Where brokers redirect after login: `<PUBLIC_URL>/broker-callback/<broker>`. */
   callbackBase: string;
 }
-
-const STATE_TTL_MS = 15 * 60_000;
 
 /** Linking, re-linking and unlinking broker accounts. Part of the broker gateway: it handles credentials. */
 export class BrokerAccountService {
@@ -59,7 +58,7 @@ export class BrokerAccountService {
     const adapter = this.d.gateway.brokerAdapter(input.broker);
     const label = input.label.trim();
     if (!label) throw badRequest('Give the account a name.');
-    const credentials = this.credentialsFrom(adapter, input.credentials, input.mode === 'live');
+    const credentials = credentialsFrom(adapter, input.credentials, input.mode === 'live');
     const entitlement = await this.d.entitlements.check(userId);
     const plan = entitlement.plan;
     if (plan) {
@@ -104,16 +103,7 @@ export class BrokerAccountService {
 
   /** The broker redirected the browser to us. [state] says which account. */
   async callback(broker: string, params: Record<string, string>) {
-    const state = params['state'];
-    if (!state) throw badRequest('The broker redirect carried no state.');
-    let parsed: { accountId: string; exp: number };
-    try {
-      parsed = JSON.parse(this.d.box.decrypt(Buffer.from(state, 'base64url').toString('utf8')));
-    } catch {
-      throw badRequest('This login link is invalid. Start again from the app.');
-    }
-    if (parsed.exp < this.d.clock().getTime()) throw badRequest('This login link has expired. Start again from the app.');
-    const account = await this.d.accounts.find(parsed.accountId);
+    const account = await this.d.accounts.find(decodeState(this.d.box, params['state'], this.d.clock()));
     if (!account || account.broker !== broker) throw notFound('Broker account not found.');
     return this.finish(account, params);
   }
@@ -121,7 +111,7 @@ export class BrokerAccountService {
   async update(userId: string, id: string, patch: { mode?: AccountMode | undefined }) {
     const account = await this.owned(userId, id);
     if (patch.mode && patch.mode !== account.mode) {
-      if (patch.mode === 'live') this.credentialsFrom(this.d.gateway.brokerAdapter(account.broker), { ...flatten(this.d.gateway.credentials(account)) }, true);
+      if (patch.mode === 'live') credentialsFrom(this.d.gateway.brokerAdapter(account.broker), flatten(this.d.gateway.credentials(account)), true);
       await this.d.accounts.setMode(id, patch.mode);
       this.d.log.info({ userId, accountId: id, mode: patch.mode, event: 'account_mode' }, 'broker account mode changed');
     }
@@ -183,21 +173,8 @@ export class BrokerAccountService {
 
   private async challenge(account: BrokerAccountRecord, adapter: BrokerAdapter, credentials: Credentials): Promise<LinkChallenge> {
     if (account.mode === 'paper') return { kind: 'input', fields: [], message: 'Paper accounts need no broker login.', url: null };
-    const state = Buffer.from(
-      this.d.box.encrypt(JSON.stringify({ accountId: account.id, exp: this.d.clock().getTime() + STATE_TTL_MS })),
-    ).toString('base64url');
+    const state = encodeState(this.d.box, account.id, this.d.clock());
     return adapter.startLink({ credentials, state, callbackUrl: `${this.d.callbackBase}/${adapter.code}` });
-  }
-
-  /** Paper accounts may skip the broker's keys; they're needed before switching the account to live. */
-  private credentialsFrom(adapter: BrokerAdapter, given: Record<string, string>, required: boolean): Credentials {
-    const extra: Record<string, string> = {};
-    for (const f of adapter.credentialFields) {
-      const value = given[f.name]?.trim() ?? '';
-      if (required && f.required && !value) throw badRequest(`${adapter.label} needs ${f.label}.`);
-      if (f.name !== 'apiKey' && f.name !== 'apiSecret' && value) extra[f.name] = value;
-    }
-    return { apiKey: given['apiKey']?.trim() ?? '', apiSecret: given['apiSecret']?.trim() ?? '', extra };
   }
 
   private async owned(userId: string, id: string): Promise<BrokerAccountRecord> {
@@ -206,33 +183,9 @@ export class BrokerAccountService {
     return account;
   }
 
-  /** What clients see: never a secret or token, and only a masked API key. */
   private async view(a: BrokerAccountRecord) {
-    const now = this.d.clock();
-    const key = this.d.gateway.credentials(a).apiKey;
-    let health: string = a.tokenState;
-    if (a.mode === 'paper') health = 'valid';
-    else if (a.tokenState === 'valid' && (!a.tokenExpiresAt || a.tokenExpiresAt <= now)) health = 'expired';
-    return {
-      id: a.id,
-      broker: a.broker,
-      label: a.label,
-      mode: a.mode,
-      apiKeyMasked: maskKey(key),
-      token: {
-        state: health,
-        expiresAt: a.mode === 'paper' ? null : a.tokenExpiresAt?.toISOString() ?? null,
-        lastAuthAt: a.lastAuthAt?.toISOString() ?? null,
-        message: a.mode === 'paper' ? null : a.tokenMessage,
-      },
-      createdAt: a.createdAt.toISOString(),
-    };
+    return accountView(a, this.d.gateway.credentials(a).apiKey, this.d.clock());
   }
 }
 
-const flatten = (c: Credentials): Record<string, string> => ({ apiKey: c.apiKey, apiSecret: c.apiSecret, ...c.extra });
-
-export function maskKey(key: string): string {
-  if (!key) return '';
-  return key.length <= 6 ? '••••' : `${key.slice(0, 2)}••••${key.slice(-2)}`;
-}
+export { maskKey } from './account-rules.ts';

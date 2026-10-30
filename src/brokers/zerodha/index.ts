@@ -23,6 +23,7 @@ import {
   type TokenSet,
   type WebhookHint,
 } from '../adapter.ts';
+import { mapStatus, type BrokerState } from '../status.ts';
 import { extractParam, objectOf, parseCsv, type HttpRequest, type HttpResult } from '../http.ts';
 
 export const KITE_BASE = 'https://api.kite.trade';
@@ -46,25 +47,18 @@ const CAPABILITIES: Capabilities = {
   webhooks: true,
 };
 
-/** Kite's order status → ours. Unrecognised in-flight states stay SUBMITTED so reconciliation keeps checking. */
-export function kiteStatus(status: string, filled: number): LegStatus {
-  switch (status.toUpperCase()) {
-    case 'COMPLETE':
-      return 'FILLED';
-    case 'CANCELLED':
-      return 'CANCELLED';
-    case 'REJECTED':
-      return 'REJECTED';
-    case 'EXPIRED':
-    case 'LAPSED':
-      return 'EXPIRED';
-    case 'OPEN':
-    case 'TRIGGER PENDING':
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'OPEN';
-    default:
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'SUBMITTED';
-  }
-}
+const KITE_STATES: Record<string, BrokerState> = {
+  COMPLETE: 'FILLED',
+  CANCELLED: 'CANCELLED',
+  REJECTED: 'REJECTED',
+  EXPIRED: 'EXPIRED',
+  LAPSED: 'EXPIRED',
+  OPEN: 'WORKING',
+  'TRIGGER PENDING': 'WORKING',
+};
+
+/** Kite's order status → ours. */
+export const kiteStatus = (status: string, filled: number): LegStatus => mapStatus(KITE_STATES, status, filled);
 
 /**
  * Zerodha Kite Connect v3. Docs: https://kite.trade/docs/connect/v3/

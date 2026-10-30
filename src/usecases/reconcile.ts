@@ -1,3 +1,4 @@
+import type { BrokerOrder } from '../brokers/adapter.ts';
 import type { BrokerAccountRepository } from '../data/broker-accounts.ts';
 import type { Db } from '../data/db.ts';
 import type { Leg, OrderRepository } from '../data/orders.ts';
@@ -78,47 +79,55 @@ export class Reconciler {
    * by us that we don't know.
    */
   async endOfDay(): Promise<{ accounts: number; issues: number }> {
-    const now = this.d.clock();
-    const since = lastIstTime(now, 0, 0);
+    const since = lastIstTime(this.d.clock(), 0, 0);
     let accounts = 0;
     let issues = 0;
     for (const account of (await this.d.accounts.listAll()).filter((a) => a.mode === 'live')) {
       const legs = await this.d.orders.legsForAccountSince(account.id, since);
       if (legs.length === 0) continue;
       accounts++;
-      let book;
-      try {
-        book = await this.d.gateway.listOrders(account.id);
-      } catch (e) {
-        issues += await this.issue(null, account.id, null, 'order_book_unavailable', `Couldn't read the order book: ${(e as Error).message}`);
-        continue;
-      }
-      const byId = new Map(book.map((o) => [o.brokerOrderId, o]));
-      const byRef = new Map(book.filter((o) => o.clientRef).map((o) => [o.clientRef!, o]));
-      for (const leg of legs) {
-        const bo = (leg.brokerOrderId ? byId.get(leg.brokerOrderId) : undefined) ?? byRef.get(leg.clientRef);
-        if (!bo) {
-          if (leg.brokerOrderId) issues += await this.issue(leg.id, account.id, leg.brokerOrderId, 'missing_at_broker', `We have ${leg.status}; the broker's order book has no such order.`);
-          continue;
-        }
-        const differs = bo.status !== leg.status || bo.filledQty !== leg.filledQty;
-        if (differs && isTerminal(leg.status)) {
-          issues += await this.issue(leg.id, account.id, bo.brokerOrderId, 'status_mismatch', `We had ${leg.status} (${leg.filledQty} filled); the broker says ${bo.status} (${bo.filledQty} filled).`);
-        }
-        if (differs) {
-          const parent = (await this.d.orders.parent(leg.parentOrderId))!;
-          await this.d.legs.apply(leg, bo, 'reconcile', 'eod', parent.userId);
-        }
-      }
-      const known = new Set(legs.map((l) => l.clientRef));
-      for (const o of book) {
-        if (o.clientRef?.startsWith('NX') && !known.has(o.clientRef) && !(await this.knownRef(o.clientRef))) {
-          issues += await this.issue(null, account.id, o.brokerOrderId, 'unknown_order', `The broker has order ${o.brokerOrderId} tagged ${o.clientRef}, which we have no record of.`);
-        }
-      }
+      issues += await this.compareAccount(account.id, legs);
     }
     this.d.log.info({ job: 'eod_reconcile', count: accounts, outcome: `${issues} issues` }, 'end-of-day reconciliation done');
     return { accounts, issues };
+  }
+
+  /** Compares one account's legs with its order book. Returns how many issues were recorded. */
+  private async compareAccount(accountId: string, legs: readonly Leg[]): Promise<number> {
+    let book: BrokerOrder[];
+    try {
+      book = await this.d.gateway.listOrders(accountId);
+    } catch (e) {
+      return this.issue(null, accountId, null, 'order_book_unavailable', `Couldn't read the order book: ${(e as Error).message}`);
+    }
+    const byId = new Map(book.map((o) => [o.brokerOrderId, o]));
+    const byRef = new Map(book.filter((o) => o.clientRef).map((o) => [o.clientRef!, o]));
+    let issues = 0;
+    for (const leg of legs) {
+      const bo = (leg.brokerOrderId ? byId.get(leg.brokerOrderId) : undefined) ?? byRef.get(leg.clientRef);
+      issues += await this.compareLeg(accountId, leg, bo);
+    }
+    const known = new Set(legs.map((l) => l.clientRef));
+    for (const o of book) {
+      if (!o.clientRef?.startsWith('NX') || known.has(o.clientRef) || (await this.knownRef(o.clientRef))) continue;
+      issues += await this.issue(null, accountId, o.brokerOrderId, 'unknown_order', `The broker has order ${o.brokerOrderId} tagged ${o.clientRef}, which we have no record of.`);
+    }
+    return issues;
+  }
+
+  /** Applies the broker's version of [leg] when it differs; records an issue when we'd already called it finished. */
+  private async compareLeg(accountId: string, leg: Leg, bo: BrokerOrder | undefined): Promise<number> {
+    if (!bo) {
+      if (!leg.brokerOrderId) return 0;
+      return this.issue(leg.id, accountId, leg.brokerOrderId, 'missing_at_broker', `We have ${leg.status}; the broker's order book has no such order.`);
+    }
+    if (bo.status === leg.status && bo.filledQty === leg.filledQty) return 0;
+    const issues = isTerminal(leg.status)
+      ? await this.issue(leg.id, accountId, bo.brokerOrderId, 'status_mismatch', `We had ${leg.status} (${leg.filledQty} filled); the broker says ${bo.status} (${bo.filledQty} filled).`)
+      : 0;
+    const parent = (await this.d.orders.parent(leg.parentOrderId))!;
+    await this.d.legs.apply(leg, bo, 'eod', parent.userId);
+    return issues;
   }
 
   async openIssues(): Promise<ReconciliationIssue[]> {

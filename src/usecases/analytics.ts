@@ -64,28 +64,13 @@ export class AnalyticsService {
    */
   async pnl(userId: string, q: { from?: string | undefined; to?: string | undefined }) {
     const { from, to } = this.range(q.from, q.to);
-    const books = new Map<string, { accountId: string; instrumentId: string; qty: number; avg: number; realised: number }>();
+    const books = new Map<string, Book>();
     for (const f of await this.d.analytics.fills(userId, to)) {
       const key = `${f.accountId}|${f.instrumentId}`;
-      const b = books.get(key) ?? { accountId: f.accountId, instrumentId: f.instrumentId, qty: 0, avg: 0, realised: 0 };
-      const signed = f.side === 'BUY' ? f.filledQty : -f.filledQty;
-      const inPeriod = istDate(f.terminalAt) >= from;
-      if (b.qty === 0 || Math.sign(b.qty) === Math.sign(signed)) {
-        // Adding to the position: new average cost.
-        b.avg = (b.avg * Math.abs(b.qty) + f.avgPricePaise * Math.abs(signed)) / (Math.abs(b.qty) + Math.abs(signed));
-        b.qty += signed;
-      } else {
-        const closing = Math.min(Math.abs(b.qty), Math.abs(signed));
-        const pnl = (f.avgPricePaise - b.avg) * closing * Math.sign(b.qty);
-        if (inPeriod) b.realised += pnl;
-        const rest = Math.abs(signed) - closing;
-        b.qty += Math.sign(signed) * closing;
-        if (rest > 0) {
-          b.qty = Math.sign(signed) * rest;
-          b.avg = f.avgPricePaise;
-        }
-      }
-      books.set(key, b);
+      const book = books.get(key) ?? { accountId: f.accountId, instrumentId: f.instrumentId, qty: 0, avg: 0, realised: 0 };
+      books.set(key, book);
+      const pnl = applyFill(book, f.side === 'BUY' ? f.filledQty : -f.filledQty, f.avgPricePaise);
+      if (istDate(f.terminalAt) >= from) book.realised += pnl;
     }
     const realised = [...books.values()].filter((b) => b.realised !== 0).map((b) => ({ accountId: b.accountId, instrumentId: b.instrumentId, realised: rupees(Math.round(b.realised)) }));
     const unrealised = (await this.d.analytics.snapshots(userId)).map((s) => ({
@@ -106,4 +91,39 @@ export class AnalyticsService {
     if (start > end) throw badRequest('from must not be after to.');
     return { from: start, to: end };
   }
+}
+
+/** One account's running position in one instrument, at average cost. */
+interface Book {
+  accountId: string;
+  instrumentId: string;
+  /** Positive long, negative short. */
+  qty: number;
+  /** Average cost of the open quantity, in paise. */
+  avg: number;
+  realised: number;
+}
+
+/**
+ * Applies a fill of [signed] units at [price] to [book] (average-cost
+ * method) and returns the P&L it realised. Adding to the position moves the
+ * average; reducing it realises the difference; going through zero opens the
+ * rest at the fill price.
+ */
+export function applyFill(book: Book, signed: number, price: number): number {
+  if (book.qty === 0 || Math.sign(book.qty) === Math.sign(signed)) {
+    const size = Math.abs(book.qty) + Math.abs(signed);
+    book.avg = (book.avg * Math.abs(book.qty) + price * Math.abs(signed)) / size;
+    book.qty += signed;
+    return 0;
+  }
+  const closing = Math.min(Math.abs(book.qty), Math.abs(signed));
+  const pnl = (price - book.avg) * closing * Math.sign(book.qty);
+  const rest = Math.abs(signed) - closing;
+  book.qty += Math.sign(signed) * closing;
+  if (rest > 0) {
+    book.qty = Math.sign(signed) * rest;
+    book.avg = price;
+  }
+  return pnl;
 }

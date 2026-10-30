@@ -1,8 +1,7 @@
 import { BrokerError, classifyMessage, type BrokerErrorCode } from '../../domain/broker-error.ts';
-import type { Exchange } from '../../domain/instrument.ts';
 import { nextIstTime } from '../../domain/ist.ts';
 import { brokerRupeesToPaise, rupees } from '../../domain/money.ts';
-import type { LegStatus, OrderType, Product } from '../../domain/order.ts';
+import type { OrderType, Product } from '../../domain/order.ts';
 import {
   standardModifyProblem,
   type AccountContext,
@@ -20,6 +19,9 @@ import {
   type TokenSet,
 } from '../adapter.ts';
 import { objectOf, type CallKind, type HttpRequest, type HttpResult } from '../http.ts';
+import { bare, toInstrument, toOrder } from './mapping.ts';
+
+export { angelExpiry, angelStatus } from './mapping.ts';
 
 export const ANGEL_BASE = 'https://apiconnect.angelone.in';
 export const ANGEL_SCRIP_MASTER = 'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json';
@@ -36,16 +38,6 @@ const ORDER_TYPE: Record<OrderType, string> = {
   SL: 'STOPLOSS_LIMIT',
   SL_M: 'STOPLOSS_MARKET',
 };
-const ORDER_TYPE_BACK: Record<string, OrderType> = {
-  MARKET: 'MARKET',
-  LIMIT: 'LIMIT',
-  STOPLOSS_LIMIT: 'SL',
-  STOPLOSS_MARKET: 'SL_M',
-};
-const MONTHS: Record<string, string> = {
-  JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
-  JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12',
-};
 /** Angel error codes meaning the session (JWT) is invalid, expired or missing. */
 const AUTH_CODES = new Set(['AG8001', 'AG8002', 'AG8003', 'AB1010', 'AB8050']); // TODO(verify): AB1010/AB8050 as "session expired".
 
@@ -59,32 +51,6 @@ const CAPABILITIES: Capabilities = {
   headlessRefresh: true,
   webhooks: false,
 };
-
-/** Angel's order status (`orderstatus`) → ours. Unrecognised in-flight states stay SUBMITTED so reconciliation keeps checking. */
-export function angelStatus(status: string, filled: number): LegStatus {
-  switch (status.trim().toLowerCase()) {
-    case 'complete':
-      return 'FILLED';
-    case 'cancelled':
-      return 'CANCELLED';
-    case 'rejected':
-      return 'REJECTED';
-    case 'open':
-    case 'trigger pending':
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'OPEN';
-    default:
-      // 'open pending', 'validation pending', 'put order req received', 'modify pending', 'modified',
-      // 'after market order req received', and anything new.
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'SUBMITTED';
-  }
-}
-
-/** Angel's expiry (`30OCT2026`) → `2026-10-30`, or null when it isn't one. */
-export function angelExpiry(expiry: string): string | null {
-  const m = /^(\d{2})([A-Z]{3})(\d{4})$/.exec(expiry.trim().toUpperCase());
-  const month = m ? MONTHS[m[2]!] : undefined;
-  return m && month ? `${m[3]}-${month}-${m[1]}` : null;
-}
 
 /**
  * Angel One SmartAPI. Docs: https://smartapi.angelbroking.com/docs
@@ -306,54 +272,3 @@ export class AngelOneAdapter implements BrokerAdapter {
 
 /** Stop-loss orders go in the STOPLOSS variety; everything else is NORMAL. */
 const variety = (t: OrderType) => (t === 'SL' || t === 'SL_M' ? 'STOPLOSS' : 'NORMAL');
-
-/** A token string without a `Bearer ` prefix (TODO(verify): some SmartAPI answers include it), or ''. */
-function bare(value: unknown): string {
-  return typeof value === 'string' ? value.replace(/^Bearer\s+/i, '').trim() : '';
-}
-
-function toOrder(r: Record<string, unknown>): BrokerOrder {
-  const filled = Number(r['filledshares']) || 0;
-  const text = typeof r['text'] === 'string' && r['text'] ? r['text'] : null;
-  return {
-    brokerOrderId: String(r['orderid']),
-    status: angelStatus(String(r['orderstatus'] || r['status'] || ''), filled),
-    quantity: Number(r['quantity']) || 0,
-    filledQty: filled,
-    avgPricePaise: filled > 0 ? brokerRupeesToPaise(r['averageprice']) : null,
-    pricePaise: brokerRupeesToPaise(r['price']) || null,
-    triggerPaise: brokerRupeesToPaise(r['triggerprice']) || null,
-    orderType: ORDER_TYPE_BACK[String(r['ordertype'])] ?? null,
-    clientRef: typeof r['ordertag'] === 'string' && r['ordertag'] ? r['ordertag'] : null,
-    message: text,
-    raw: r,
-  };
-}
-
-/** One scrip-master row → an instrument, or null for segments and types we don't trade. */
-function toInstrument(r: Record<string, unknown>): BrokerInstrument | null {
-  const exch = String(r['exch_seg'] ?? '');
-  const kind = String(r['instrumenttype'] ?? '');
-  const symbolText = String(r['symbol'] ?? '');
-  const name = String(r['name'] ?? '');
-  const symbol = { nativeId: String(r['token'] ?? ''), tradingSymbol: symbolText, exchange: exch };
-  const lotSize = Number(r['lotsize']) || 1;
-  // Angel's strike and tick_size are in paise already.
-  const tickPaise = Math.round(Number(r['tick_size'])) || 5;
-
-  if ((exch === 'NSE' && kind === '' && symbolText.endsWith('-EQ')) || (exch === 'BSE' && kind === '')) {
-    return { exchange: exch, type: 'EQ', underlying: name, expiry: null, strikePaise: null, lotSize, tickPaise, symbol };
-  }
-  if (exch !== 'NFO' && exch !== 'BFO') return null;
-  const expiry = angelExpiry(String(r['expiry'] ?? ''));
-  if (!expiry) return null;
-  const exchange: Exchange = exch;
-  if (kind.startsWith('FUT')) {
-    return { exchange, type: 'FUT', underlying: name, expiry, strikePaise: null, lotSize, tickPaise, symbol };
-  }
-  const right = symbolText.slice(-2);
-  if (!kind.startsWith('OPT') || (right !== 'CE' && right !== 'PE')) return null;
-  return {
-    exchange, type: right, underlying: name, expiry, strikePaise: Math.round(Number(r['strike'])), lotSize, tickPaise, symbol,
-  };
-}

@@ -21,6 +21,7 @@ import {
   type TokenSet,
   type WebhookHint,
 } from '../adapter.ts';
+import { mapStatus, type BrokerState } from '../status.ts';
 import { extractParam, objectOf, type HttpRequest, type HttpResult } from '../http.ts';
 
 export const UPSTOX_BASE = 'https://api.upstox.com';
@@ -47,23 +48,16 @@ const CAPABILITIES: Capabilities = {
   webhooks: true,
 };
 
-/** Upstox's order status (lower case) → ours. Unrecognised in-flight states stay SUBMITTED so reconciliation keeps checking. */
-export function upstoxStatus(status: string, filled: number): LegStatus {
-  switch (status.toLowerCase()) {
-    case 'complete':
-      return 'FILLED';
-    case 'cancelled':
-      return 'CANCELLED';
-    case 'rejected':
-      return 'REJECTED';
-    case 'open':
-    case 'trigger pending':
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'OPEN';
-    default:
-      // validation pending, put order req received, modify pending, after market order req received, …
-      return filled > 0 ? 'PARTIALLY_FILLED' : 'SUBMITTED';
-  }
-}
+const UPSTOX_STATES: Record<string, BrokerState> = {
+  COMPLETE: 'FILLED',
+  CANCELLED: 'CANCELLED',
+  REJECTED: 'REJECTED',
+  OPEN: 'WORKING',
+  'TRIGGER PENDING': 'WORKING',
+};
+
+/** Upstox's order status → ours. */
+export const upstoxStatus = (status: string, filled: number): LegStatus => mapStatus(UPSTOX_STATES, status, filled);
 
 /**
  * Upstox API v2 (auth, reads) and v3 (order writes on the HFT host).

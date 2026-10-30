@@ -65,22 +65,9 @@ export async function buildApp(s: Services): Promise<FastifyInstance> {
   await app.register(websocket);
 
   app.setErrorHandler((error: Error & { statusCode?: number }, request, reply) => {
-    if (error instanceof AppError) {
-      const { code, message, details } = error;
-      return reply.status(error.status).send({ error: details ? { code, message, details } : { code, message } });
-    }
-    if (error instanceof BrokerError) {
-      return reply.status(error.code === 'AUTH_EXPIRED' ? 401 : 502).send({ error: { code: 'broker_error', message: error.message, details: { code: error.code } } });
-    }
-    const status = error.statusCode ?? 500;
-    if (status === 429) {
-      return reply.status(429).send({ error: { code: 'rate_limited', message: 'Too many requests. Try again in a minute.' } });
-    }
-    if (status >= 400 && status < 500) {
-      return reply.status(status).send({ error: { code: 'bad_request', message: error.message } });
-    }
-    request.log.error({ err: error }, 'unhandled error');
-    return reply.status(500).send({ error: { code: 'internal', message: 'Something went wrong on the server.' } });
+    const { status, body } = errorResponse(error);
+    if (status === 500) request.log.error({ err: error }, 'unhandled error');
+    return reply.status(status).send(body);
   });
   app.setNotFoundHandler((_request, reply) => reply.status(404).send({ error: { code: 'not_found', message: 'No such endpoint.' } }));
 
@@ -122,6 +109,22 @@ export async function buildApp(s: Services): Promise<FastifyInstance> {
   });
 
   return app;
+}
+
+/** The status and `{ error }` body for anything a route throws. Unknown errors are 500s, with details only in the log. */
+export function errorResponse(error: Error & { statusCode?: number }): { status: number; body: { error: Record<string, unknown> } } {
+  if (error instanceof AppError) {
+    const { code, message, details } = error;
+    return { status: error.status, body: { error: details ? { code, message, details } : { code, message } } };
+  }
+  if (error instanceof BrokerError) {
+    const status = error.code === 'AUTH_EXPIRED' ? 401 : 502;
+    return { status, body: { error: { code: 'broker_error', message: error.message, details: { code: error.code } } } };
+  }
+  const status = error.statusCode ?? 500;
+  if (status === 429) return { status, body: { error: { code: 'rate_limited', message: 'Too many requests. Try again in a minute.' } } };
+  if (status >= 400 && status < 500) return { status, body: { error: { code: 'bad_request', message: error.message } } };
+  return { status: 500, body: { error: { code: 'internal', message: 'Something went wrong on the server.' } } };
 }
 
 /**

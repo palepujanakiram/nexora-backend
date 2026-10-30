@@ -48,10 +48,8 @@ export function parentStatus(legs: readonly { status: LegStatus; filledQty: numb
   if (legs.length === 0) return 'FAILED';
   if (legs.some((l) => !isTerminal(l.status))) return 'IN_PROGRESS';
   if (legs.every((l) => l.status === 'FILLED')) return 'COMPLETE';
-  const anyFill = legs.some((l) => l.filledQty > 0);
-  if (anyFill) return 'PARTIAL';
-  if (legs.every((l) => l.status === 'REJECTED')) return 'FAILED';
-  return 'CANCELLED';
+  if (legs.some((l) => l.filledQty > 0)) return 'PARTIAL';
+  return legs.every((l) => l.status === 'REJECTED') ? 'FAILED' : 'CANCELLED';
 }
 
 /** The order as the user asked for it, before fan-out. */
@@ -68,12 +66,19 @@ export interface OrderIntent {
   referencePricePaise: Paise | null;
 }
 
+type IntentFields = Pick<OrderIntent, 'orderType' | 'pricePaise' | 'triggerPaise' | 'quantity'>;
+
+/** Each rule an intent must meet, with what to say when it doesn't. */
+const INTENT_RULES: readonly [(i: IntentFields) => boolean, (i: IntentFields) => string][] = [
+  [(i) => !Number.isInteger(i.quantity) || i.quantity <= 0, () => 'Quantity must be a positive whole number.'],
+  [(i) => needsPrice(i.orderType) && (i.pricePaise === null || i.pricePaise <= 0), (i) => `${i.orderType} orders need a price.`],
+  [(i) => !needsPrice(i.orderType) && i.pricePaise !== null, (i) => `${i.orderType} orders take no price.`],
+  [(i) => needsTrigger(i.orderType) && (i.triggerPaise === null || i.triggerPaise <= 0), (i) => `${i.orderType} orders need a trigger price.`],
+  [(i) => !needsTrigger(i.orderType) && i.triggerPaise !== null, (i) => `${i.orderType} orders take no trigger price.`],
+];
+
 /** Checks that price and trigger match the order type. Returns the problem, or null. */
-export function intentProblem(i: Pick<OrderIntent, 'orderType' | 'pricePaise' | 'triggerPaise' | 'quantity'>): string | null {
-  if (!Number.isInteger(i.quantity) || i.quantity <= 0) return 'Quantity must be a positive whole number.';
-  if (needsPrice(i.orderType) && (i.pricePaise === null || i.pricePaise <= 0)) return `${i.orderType} orders need a price.`;
-  if (!needsPrice(i.orderType) && i.pricePaise !== null) return `${i.orderType} orders take no price.`;
-  if (needsTrigger(i.orderType) && (i.triggerPaise === null || i.triggerPaise <= 0)) return `${i.orderType} orders need a trigger price.`;
-  if (!needsTrigger(i.orderType) && i.triggerPaise !== null) return `${i.orderType} orders take no trigger price.`;
-  return null;
+export function intentProblem(i: IntentFields): string | null {
+  const broken = INTENT_RULES.find(([fails]) => fails(i));
+  return broken ? broken[1](i) : null;
 }

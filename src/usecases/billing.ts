@@ -27,25 +27,18 @@ export const planView = (p: Plan) => ({
   limits: { maxAccounts: p.maxAccounts, maxOrdersPerDay: p.maxOrdersPerDay, maxFanout: p.maxFanout, brokers: p.brokers },
 });
 
-/** Razorpay's subscription status → ours. */
-export function subscriptionStatus(razorpay: string): SubscriptionStatus {
-  switch (razorpay) {
-    case 'active':
-      return 'active';
-    case 'pending':
-      return 'past_due';
-    case 'halted':
-    case 'paused':
-      return 'halted';
-    case 'cancelled':
-      return 'cancelled';
-    case 'completed':
-    case 'expired':
-      return 'expired';
-    default:
-      return 'created';
-  }
-}
+const RAZORPAY_STATUS: Record<string, SubscriptionStatus> = {
+  active: 'active',
+  pending: 'past_due',
+  halted: 'halted',
+  paused: 'halted',
+  cancelled: 'cancelled',
+  completed: 'expired',
+  expired: 'expired',
+};
+
+/** Razorpay's subscription status → ours. Anything else (created, authenticated) isn't paid yet. */
+export const subscriptionStatus = (razorpay: string): SubscriptionStatus => RAZORPAY_STATUS[razorpay] ?? 'created';
 
 /**
  * Plans, Razorpay subscriptions and the webhook that drives them. The
