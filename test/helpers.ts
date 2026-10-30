@@ -8,6 +8,13 @@ import type { Log } from '../src/logging.ts';
 export const NOW = new Date('2026-10-27T04:00:00Z');
 export const clock = () => NOW;
 
+/**
+ * Timeout for tests that boot a fresh in-process Postgres and run every
+ * migration (the CLI, server start-up, opening a database by URL). That takes
+ * a few seconds per boot on CI runners with coverage on, over Vitest's 5 s default.
+ */
+export const BOOT_TIMEOUT = 60_000;
+
 /** A valid encryption key for tests. */
 export const TEST_KEY = Buffer.alloc(32, 7).toString('base64');
 

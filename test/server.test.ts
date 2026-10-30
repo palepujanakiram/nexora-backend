@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Runtime } from '../src/container.ts';
 import { closeOnSignals, main, start } from '../src/server.ts';
 import { JWT_PRIVATE_KEY, testClock } from './app.ts';
-import { TEST_KEY, noNetwork, defined, asyncNoop, noop } from './helpers.ts';
+import { BOOT_TIMEOUT, TEST_KEY, noNetwork, defined, asyncNoop, noop } from './helpers.ts';
 
 const ENV = {
   PORT: '0',
@@ -33,7 +33,7 @@ async function health(app: FastifyInstance) {
 }
 
 describe('start', () => {
-  it('listens and answers /health with jobs off', async () => {
+  it('listens and answers /health with jobs off', { timeout: BOOT_TIMEOUT }, async () => {
     const app = await start({ ...ENV, JOBS_ENABLED: 'false' }, runtime());
     started.push(app);
     expect(await health(app)).toEqual({
@@ -42,7 +42,7 @@ describe('start', () => {
     });
   });
 
-  it('starts the jobs and closes cleanly', async () => {
+  it('starts the jobs and closes cleanly', { timeout: BOOT_TIMEOUT }, async () => {
     const app = await start({ ...ENV, JOBS_ENABLED: 'true', LIVE_TRADING: 'true' }, runtime());
     expect((await health(app)).body['liveTrading']).toBe(true);
     await app.close();
@@ -92,7 +92,7 @@ describe('closeOnSignals', () => {
 });
 
 describe('main', () => {
-  it('starts the server and closes it on SIGTERM', async () => {
+  it('starts the server and closes it on SIGTERM', { timeout: BOOT_TIMEOUT }, async () => {
     const before = process.listenerCount('SIGTERM');
     const app = await main({ ...ENV, JOBS_ENABLED: 'false' }, runtime());
     started.push(app);

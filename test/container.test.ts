@@ -11,7 +11,7 @@ import { AppError } from '../src/domain/errors.ts';
 import { createLogger } from '../src/logging.ts';
 import { JWT_PRIVATE_KEY, testClock } from './app.ts';
 import { testDb } from './db.ts';
-import { TEST_KEY, fakeFetch, json, noNetwork, type FakeFetch, defined, asyncNoop, noop } from './helpers.ts';
+import { BOOT_TIMEOUT, TEST_KEY, fakeFetch, json, noNetwork, type FakeFetch, defined, asyncNoop, noop } from './helpers.ts';
 
 const BASE = { DATABASE_URL: 'pglite:memory', ENCRYPTION_KEYS: `1:${TEST_KEY}`, JWT_PRIVATE_KEY, LOG_LEVEL: 'silent' };
 
@@ -25,7 +25,7 @@ afterEach(async () => {
 const runtime = (fetch: FakeFetch = noNetwork()): Runtime => ({ fetch, clock: testClock(), sleep: asyncNoop, print: noop });
 
 describe('openDatabase', () => {
-  it('opens a migrated in-memory PGlite', async () => {
+  it('opens a migrated in-memory PGlite', { timeout: BOOT_TIMEOUT }, async () => {
     const db = await openDatabase('pglite:memory');
     opened.push(db);
     const [row] = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM schema_migrations');
@@ -33,7 +33,7 @@ describe('openDatabase', () => {
     expect(await db.query('SELECT * FROM paper_orders')).toEqual([]);
   });
 
-  it('opens a PGlite data directory that keeps its data', async () => {
+  it('opens a PGlite data directory that keeps its data', { timeout: BOOT_TIMEOUT }, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'nexora-pglite-'));
     dirs.push(dir);
     const first = await openDatabase(`pglite:${dir}`);
@@ -102,7 +102,7 @@ describe('createServices', () => {
     expect(await s.scheduler.runDue()).not.toContain('eod_reconcile');
   });
 
-  it('opens the configured database and logger when none are given', async () => {
+  it('opens the configured database and logger when none are given', { timeout: BOOT_TIMEOUT }, async () => {
     const s = await createServices(loadConfig({ ...BASE, ENCRYPTION_KEYS: undefined, ENCRYPTION_KEY: TEST_KEY }), runtime());
     opened.push(s.db);
     expect(s.logger.level).toBe('silent');

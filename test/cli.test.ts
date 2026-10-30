@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { main, runCli } from '../src/cli.ts';
 import { JWT_PRIVATE_KEY } from './app.ts';
-import { TEST_KEY, defined } from './helpers.ts';
+import { BOOT_TIMEOUT, TEST_KEY, defined } from './helpers.ts';
 
 const ENV = { DATABASE_URL: 'pglite:memory', ENCRYPTION_KEYS: `1:${TEST_KEY}`, JWT_PRIVATE_KEY, LOG_LEVEL: 'silent' };
 
@@ -26,17 +26,17 @@ describe('runCli', () => {
     }
   });
 
-  it('migrates the database', async () => {
+  it('migrates the database', { timeout: BOOT_TIMEOUT }, async () => {
     expect(await runCli(['migrate'], ENV)).toBe('Database is up to date.');
   });
 
-  it('creates a user', async () => {
+  it('creates a user', { timeout: BOOT_TIMEOUT }, async () => {
     expect(await runCli(['create-user', '98765 43210', 'me@example.com'], ENV)).toMatch(/^Created user \+919876543210 \(\S+\)\.$/);
     expect(await runCli(['create-user', '+91 87654 32109'], ENV)).toMatch(/^Created user \+918765432109 \(\S+\)\.$/);
     await expect(runCli(['create-user', '12345'], ENV)).rejects.toThrow('Enter a 10-digit Indian mobile number.');
   });
 
-  it('creates a client', async () => {
+  it('creates a client', { timeout: BOOT_TIMEOUT }, async () => {
     expect(await runCli(['create-client', 'Web app', 'web'], ENV)).toMatch(/^Created client Web app \(\S+\)\.$/);
     expect(await runCli(['create-client', 'Partner'], ENV)).toMatch(/^Created client Partner \(\S+\)\.$/);
   });
