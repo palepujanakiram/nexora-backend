@@ -1,64 +1,65 @@
 import type { FastifyPluginAsync } from 'fastify';
 
-import type { SignedIn } from '../../usecases/auth.ts';
-import { bearerToken, userOf, type AppDeps } from '../app.ts';
-import { ChangePasswordBody, LoginBody, RegisterBody, StartOtpBody, VerifyOtpBody, parse } from '../schemas.ts';
+import type { Services } from '../../container.ts';
+import type { User } from '../../data/identity.ts';
+import { e164 } from '../../domain/phone.ts';
+import { principalOf } from '../app.ts';
+import { OtpRequestBody, OtpVerifyBody, RefreshBody, parse } from '../schemas.ts';
 
-const signedIn = ({ token, user }: SignedIn) => ({
-  token,
-  user: { id: user.id, email: user.email, phone: user.phone && `+${user.phone}` },
-});
+export const userView = (u: User) => ({ id: u.id, phone: e164(u.phone), email: u.email, createdAt: u.createdAt.toISOString() });
 
-/** Sign-up and sign-in. Public, with a tighter rate limit against password and code guessing. */
-export const authRoutes =
-  ({ auth, otp, config }: AppDeps): FastifyPluginAsync =>
+/** OTP sign-in, token refresh and the JWKS. Public, with a tighter rate limit against guessing. */
+export const publicAuthRoutes =
+  ({ identity, signer, config }: Services): FastifyPluginAsync =>
   async (app) => {
     const limit = { rateLimit: { max: config.AUTH_RATE_LIMIT_PER_MINUTE, timeWindow: '1 minute' } };
 
-    app.post('/auth/register', { config: limit }, async (request, reply) => {
-      const body = parse(RegisterBody, request.body);
-      return reply.status(201).send(signedIn(await auth.register(body)));
+    app.post('/auth/otp/request', { config: limit }, async (request) => {
+      return identity.requestOtp({ ...parse(OtpRequestBody, request.body), ip: request.ip });
     });
 
-    app.post('/auth/login', { config: limit }, async (request) => {
-      return signedIn(await auth.login(parse(LoginBody, request.body)));
-    });
-
-    app.post('/auth/otp/start', { config: limit }, async (request) => {
-      return otp.start({ ...parse(StartOtpBody, request.body), ip: request.ip });
-    });
-
-    // `{ token, user }` like the other sign-ins, plus ManageMyFloor's `tokens` shape.
     app.post('/auth/otp/verify', { config: limit }, async (request) => {
-      const session = await otp.verify(parse(VerifyOtpBody, request.body));
-      return {
-        ...signedIn(session),
-        tokens: { access_token: session.token, token_type: 'Bearer', expires_in: session.expiresInSeconds },
-      };
+      const { user, ...tokens } = await identity.verifyOtp({ ...parse(OtpVerifyBody, request.body), ip: request.ip });
+      return { ...tokens, user: userView(user) };
+    });
+
+    app.post('/auth/refresh', { config: limit }, async (request) => identity.refresh(parse(RefreshBody, request.body)));
+
+    app.get('/.well-known/jwks.json', async (_request, reply) => {
+      reply.header('Cache-Control', 'public, max-age=300');
+      return signer.jwks();
     });
   };
 
-/** The signed-in user's own session and password. */
-export const meRoutes =
-  ({ auth }: AppDeps): FastifyPluginAsync =>
+/** The signed-in user's own sessions. */
+export const authRoutes =
+  ({ identity }: Services): FastifyPluginAsync =>
   async (app) => {
-    app.get('/me', async (request) => {
-      const user = userOf(request);
-      return {
-        id: user.id,
-        email: user.email,
-        phone: user.phone && `+${user.phone}`,
-        createdAt: user.createdAt.toISOString(),
-      };
-    });
+    app.get('/me', async (request) => userView(principalOf(request).user));
 
     app.post('/auth/logout', async (request, reply) => {
-      auth.logout(bearerToken(request));
+      await identity.logout(principalOf(request).sessionId);
       return reply.status(204).send();
     });
 
-    app.post('/auth/password', async (request) => {
-      const body = parse(ChangePasswordBody, request.body);
-      return signedIn(await auth.changePassword(userOf(request), body.currentPassword, body.newPassword, body.device));
+    app.get('/auth/sessions', async (request) => {
+      const me = principalOf(request);
+      return {
+        sessions: (await identity.sessions(me.user.id)).map((s) => ({
+          id: s.id,
+          clientId: s.clientId,
+          device: s.device,
+          ip: s.ip,
+          createdAt: s.createdAt.toISOString(),
+          lastUsedAt: s.lastUsedAt.toISOString(),
+          expiresAt: s.expiresAt.toISOString(),
+          current: s.id === me.sessionId,
+        })),
+      };
+    });
+
+    app.delete<{ Params: { id: string } }>('/auth/sessions/:id', async (request, reply) => {
+      await identity.revoke(principalOf(request).user.id, request.params.id);
+      return reply.status(204).send();
     });
   };

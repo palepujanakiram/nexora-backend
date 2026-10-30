@@ -2,7 +2,7 @@
 # change `app` to a name of your own before `fly launch`.
 # Orders must leave from one static IP, so this runs exactly one machine in
 # Singapore (Fly has no Indian region) with an app-scoped static egress IP
-# (see docs/deploy-fly.md).
+# (see docs/deploy-fly.md). DATABASE_URL and the keys are Fly secrets.
 
 app = "nexora-backend-jp"
 primary_region = "sin"
@@ -11,14 +11,12 @@ primary_region = "sin"
 
 [env]
   PORT = "8080"
-  DATABASE_PATH = "/data/nexora.db"
+  NODE_ENV = "production"
+  PUBLIC_URL = "https://nexora-backend-jp.fly.dev"
   # Flip to "true" only after paper trading works end to end.
   LIVE_TRADING = "false"
-  DUPLICATE_WINDOW_MINUTES = "15"
-
-[[mounts]]
-  source = "nexora_data"
-  destination = "/data"
+  BILLING_ENABLED = "false"
+  OTP_PROVIDER = "msg91"
 
 [http_service]
   internal_port = 8080
