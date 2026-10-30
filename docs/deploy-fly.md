@@ -26,8 +26,10 @@ fly mpg status <cluster-id>          # shows the "Direct IP" host
 Set `DATABASE_URL` to the cluster's **direct** host, not the PgBouncer one that `fly mpg create` prints and `fly mpg attach` sets. PgBouncer pools by transaction, which breaks the session-level advisory locks that stop two exits on the same order from running at once. Take the user, password and database from the printed connection string:
 
 ```bash
-fly secrets set --stage DATABASE_URL="postgres://fly-user:<password>@direct.<cluster-id>.flympg.net:5432/fly-db"
+fly secrets set --stage DATABASE_URL="postgres://fly-user:<password>@direct.<cluster-id>.flympg.net:5432/fly-db?sslmode=verify-full"
 ```
+
+`sslmode=verify-full` encrypts the connection and checks the cluster's certificate (a `*.<cluster-id>.flympg.net` certificate from a public CA), as Fly recommends. The private network is already encrypted, so this is defence in depth.
 
 Any other hosted Postgres works too (Neon, Supabase, RDS in `ap-southeast-1`), as long as the connection isn't through a transaction-pooling proxy. The server applies its migrations on start, under an advisory lock.
 
