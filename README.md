@@ -20,6 +20,7 @@ This is an execution layer, not a strategy engine. It doesn't generate signals, 
 
 ## What it does
 
+- **Sign-up and sign-in.** Users sign themselves up with their mobile number and an OTP, plus full name, email and three consents (`/auth/signup/*`). Each consent is recorded with its wording version and the date and time it was accepted. Returning users sign in with an OTP. Admins can still create users, and `users.created_via` records which way each user was created.
 - **Accounts.** A user links any number of broker accounts, including two at the same broker. Credentials and session tokens are encrypted per field with AES-256-GCM, and each ciphertext records its key version so keys can rotate. The API only ever returns a masked key.
 - **Daily broker login.** Kite and Upstox use a browser redirect to `/broker-callback/<broker>`. Groww is approve-and-connect. Angel One uses a TOTP and then refreshes headlessly. Accounts whose session needs the user are flagged, and the app is told over `/stream`.
 - **Orders.** Place, modify, cancel and exit across accounts. Every write needs an `Idempotency-Key` and takes a lock on the order, so a retry or a second device can't double an order or double a square-off. Exit reads the live position from each broker and sells only what's actually held.
@@ -40,11 +41,11 @@ node --env-file=.env src/server.ts
 curl localhost:8080/health
 ```
 
-Create a user and a client, then sign in. In development the OTP is printed to the console.
+Register a client (the app), then either sign up through `POST /auth/signup/request` and `/auth/signup/verify`, or create a user as an admin and sign in. In development the OTP is printed to the console.
 
 ```bash
-node --env-file=.env src/cli.ts create-user 9876543210
 node --env-file=.env src/cli.ts create-client "NexoraApp iOS" ios
+node --env-file=.env src/cli.ts create-user 9876543210
 ```
 
 ## Docs
@@ -66,6 +67,7 @@ See [.env.example](.env.example) for every setting and its default. The ones tha
 | `LIVE_TRADING` | `false` (default): writes to live accounts are logged, not sent. |
 | `BILLING_ENABLED` | `false` (default): everyone may trade. `true` needs the Razorpay settings. |
 | `OTP_PROVIDER` | `msg91` in production; `console` prints codes (refused in production). |
+| `CONSENT_VERSION` | Version of the sign-up consent wording, stored with each consent. Bump it when the text changes. |
 
 ## Development
 
