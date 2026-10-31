@@ -43,7 +43,7 @@ describe('POST /auth/otp/verify', () => {
     expect(me.refreshToken).toBeTruthy();
     const profile = await t.app.inject({ method: 'GET', url: '/me', headers: me.headers });
     expect(profile.statusCode).toBe(200);
-    expect(profile.json()).toEqual({ id: me.userId, phone: '+919876543210', email: null, createdAt: anyString() });
+    expect(profile.json()).toEqual({ id: me.userId, phone: '+919876543210', email: null, fullName: null, createdAt: anyString() });
   });
 
   it('refuses a wrong code with the tries left', async () => {
@@ -150,5 +150,47 @@ describe('GET /.well-known/jwks.json', () => {
     const { keys } = res.json<{ keys: Record<string, unknown>[] }>();
     expect(keys[0]).toMatchObject({ kty: 'OKP', crv: 'Ed25519', kid: 'k1', x: anyString() });
     expect(JSON.stringify(keys)).not.toContain('"d"');
+  });
+});
+
+describe('POST /auth/signup', () => {
+  const form = {
+    phone: '+91 91234 56780',
+    fullName: 'Ravi Kumar',
+    email: 'ravi@example.com',
+    consents: { terms: true, risk: true, dataUse: true },
+  };
+
+  it('texts a code, creates the account on verify, and returns the new user', async () => {
+    const t = await testApp();
+    const clientId = await newClient(t.app);
+    const sent = await t.app.inject({ method: 'POST', url: '/auth/signup/request', payload: form });
+    expect(sent.statusCode).toBe(200);
+    expect(sent.json()).toEqual({ sent: true, expiresInSeconds: 300 });
+    const res = await t.app.inject({ method: 'POST', url: '/auth/signup/verify', payload: { ...form, code: t.otps.at(-1), clientId, device: 'Pixel 9' } });
+    expect(res.statusCode).toBe(201);
+    const body = res.json<{ accessToken: string; refreshToken: string; user: Record<string, unknown> }>();
+    const user = { phone: '+919123456780', email: 'ravi@example.com', fullName: 'Ravi Kumar', createdAt: anyString() };
+    expect(body.user).toEqual({ id: anyString(), ...user });
+    expect(body.refreshToken).toBeTruthy();
+    const me = await t.app.inject({ method: 'GET', url: '/me', headers: { authorization: `Bearer ${body.accessToken}` } });
+    expect(me.json()).toEqual(body.user);
+  });
+
+  it('refuses a body without the consents', async () => {
+    const t = await testApp();
+    const res = await t.app.inject({ method: 'POST', url: '/auth/signup/request', payload: { ...form, consents: undefined } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json<ErrorBody>().error).toMatchObject({ code: 'bad_request', message: stringMatching(/^consents: /) });
+    expect(t.otps).toHaveLength(0);
+  });
+
+  it('answers 409 when the number already has an account', async () => {
+    const t = await testApp();
+    const me = await signIn(t, form.phone);
+    await t.app.inject({ method: 'POST', url: '/auth/signup/request', payload: form });
+    const res = await t.app.inject({ method: 'POST', url: '/auth/signup/verify', payload: { ...form, code: t.otps.at(-1), clientId: me.clientId } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: { code: 'already_registered', message: 'This mobile number already has an account. Sign in instead.' } });
   });
 });

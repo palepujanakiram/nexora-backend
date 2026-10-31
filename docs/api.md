@@ -26,7 +26,7 @@ Requests and responses are JSON. Prices are rupee strings with up to two decimal
 | 503 | `kill_switch`, `billing_unavailable`, `otp_unavailable` | Trading paused, or a feature not configured. |
 | 500 | `internal` | A bug. Details are in the server log only. |
 
-## Sign-in (OTP, multi-client)
+## Sign-up and sign-in (OTP, multi-client)
 
 Every front end is registered as a **client** (`POST /admin/clients`) with its own token lifetimes. Access tokens are EdDSA JWTs that live 15 minutes by default. Refresh tokens are opaque and rotate on every use; replaying an old one ends the whole session.
 
@@ -50,9 +50,43 @@ Every front end is registered as a **client** (`POST /admin/clients`) with its o
 {
   "accessToken": "eyJ…", "tokenType": "Bearer", "expiresIn": 900,
   "refreshToken": "rt_…", "refreshExpiresAt": "2026-11-26T04:00:00.000Z", "sessionId": "ses_…",
-  "user": { "id": "usr_…", "phone": "+919876543210", "email": null, "createdAt": "…" }
+  "user": { "id": "usr_…", "phone": "+919876543210", "email": null, "fullName": null, "createdAt": "…" }
 }
 ```
+
+`fullName` is set for users who signed themselves up, and `null` for users an admin created. In the database, `users.created_via` records how each user was created: `admin` (`POST /admin/users` or the CLI) or `client` (self sign-up, with `created_by_client_id` naming the app).
+
+### `POST /auth/signup/request` (public)
+
+```json
+{
+  "phone": "+91 91234 56780",
+  "fullName": "Ravi Kumar",
+  "email": "ravi@example.com",
+  "consents": { "terms": true, "risk": true, "dataUse": true }
+}
+```
+
+Checks the form, then texts a **sign-up** code: `200 { "sent": true, "expiresInSeconds": 300 }`. Every consent must be `true`. A bad field is `400` with the reason (`Enter a valid email address.`, `Enter your full name.`, `Please confirm each of the statements to create your account.`). The code goes out even if the number is already registered, so this endpoint doesn't reveal who has an account. Sign-up and sign-in codes share the same hourly limits.
+
+### `POST /auth/signup/verify` (public)
+
+The same form plus `code`, `clientId` and `device`. `201` with the same shape as `/auth/otp/verify`, signed in:
+
+```json
+{ "accessToken": "eyJ…", "…": "…",
+  "user": { "id": "usr_…", "phone": "+919123456780", "email": "ravi@example.com", "fullName": "Ravi Kumar",
+            "createdAt": "…" } }
+```
+
+Clashes are checked only after the code is proven, and they don't use the code up, so the user can fix the form and send it again (each try counts toward the code's 5):
+
+| | |
+|---|---|
+| `409 already_registered` | The number already has an account: sign in instead. |
+| `409 conflict` | The email is already registered with another account. |
+
+A sign-up code can't sign in and a sign-in code can't sign up. Each consent (`terms`, `risk`, `data_use`) is stored as its own row in `user_consents` with the date and time it was accepted (`accepted_at`), the IP, and `CONSENT_VERSION` (the version of the wording the app shows).
 
 ### `POST /auth/refresh` (public)
 
@@ -74,7 +108,7 @@ Entitlements are deliberately **not** in the access token. They're checked on ev
 
 | | |
 |---|---|
-| `POST /admin/users` | `{ phone, email? }` → `201` user. The only way users are created. |
+| `POST /admin/users` | `{ phone, email? }` → `201` user, without a sign-up profile. Users can also sign themselves up (`/auth/signup/*`). |
 | `POST /admin/clients`, `GET /admin/clients` | `{ name, platform: web\|ios\|android\|partner\|other, grantTypes?, accessTtlSeconds? (60–3600, default 900), refreshTtlSeconds? (default 30 days) }` |
 | `GET /admin/kill-switch`, `POST /admin/kill-switch` | `{ on: true, reason: "bad fills" }`. Takes effect on the next order. While on, every outbound order (entry, modify, exit) is refused with `503 kill_switch`; cancels still go out. |
 | `POST /admin/plans` | Upsert a plan: `{ code, name, price, interval: monthly\|yearly, maxAccounts, maxOrdersPerDay, maxFanout, brokers: [...], razorpayPlanId, active }`. |

@@ -61,6 +61,9 @@ const ConfigSchema = z
     OTP_LENGTH: z.coerce.number().int().min(4).max(8).default(6),
     OTP_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
 
+    // The version of the sign-up statements' wording (terms, risk, data use) recorded with each consent.
+    CONSENT_VERSION: z.string().trim().min(1).max(40).default('draft'),
+
     /** Must be true for live accounts to send real orders. Off, every broker write is logged instead (dry run). */
     LIVE_TRADING: flag(false),
     BROKER_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(8000),

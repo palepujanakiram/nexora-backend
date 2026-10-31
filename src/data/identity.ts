@@ -1,14 +1,23 @@
 import type { Db, Queryable } from './db.ts';
 import { single } from '../domain/invariant.ts';
+import type { ConsentKind } from '../domain/profile.ts';
 
 export interface User {
   id: string;
   /** `91XXXXXXXXXX`. */
   phone: string;
   email: string | null;
+  /** Given at sign-up; null for users an admin created. */
+  fullName: string | null;
+  /** `admin`: created by an admin (API or CLI). `client`: signed themselves up through [createdByClientId]. */
+  createdVia: UserOrigin;
+  createdByClientId: string | null;
   status: 'active' | 'disabled';
   createdAt: Date;
 }
+
+export const USER_ORIGINS = ['admin', 'client'] as const;
+export type UserOrigin = (typeof USER_ORIGINS)[number];
 
 export const CLIENT_PLATFORMS = ['web', 'ios', 'android', 'partner', 'other'] as const;
 export type ClientPlatform = (typeof CLIENT_PLATFORMS)[number];
@@ -41,8 +50,12 @@ export interface Session {
   revokedReason: string | null;
 }
 
+export const OTP_PURPOSES = ['login', 'signup'] as const;
+export type OtpPurpose = (typeof OTP_PURPOSES)[number];
+
 export interface OtpCode {
   id: string;
+  purpose: OtpPurpose;
   phone: string;
   ip: string;
   codeHash: string;
@@ -52,12 +65,22 @@ export interface OtpCode {
   usedAt: Date | null;
 }
 
+export interface Consent {
+  kind: ConsentKind;
+  version: string;
+  acceptedAt: Date;
+  ip: string;
+}
+
 type Row = Record<string, unknown>;
 
 const toUser = (r: Row): User => ({
   id: r['id'] as string,
   phone: r['phone'] as string,
   email: (r['email'] as string | null) ?? null,
+  fullName: (r['full_name'] as string | null) ?? null,
+  createdVia: r['created_via'] as UserOrigin,
+  createdByClientId: (r['created_by_client_id'] as string | null) ?? null,
   status: r['status'] as User['status'],
   createdAt: r['created_at'] as Date,
 });
@@ -87,6 +110,7 @@ const toSession = (r: Row): Session => ({
 
 const toOtp = (r: Row): OtpCode => ({
   id: r['id'] as string,
+  purpose: r['purpose'] as OtpPurpose,
   phone: r['phone'] as string,
   ip: r['ip'] as string,
   codeHash: r['code_hash'] as string,
@@ -96,7 +120,15 @@ const toOtp = (r: Row): OtpCode => ({
   usedAt: (r['used_at'] as Date | null) ?? null,
 });
 
-/** Users, clients, sessions, refresh tokens and OTP codes: the identity module's tables. */
+async function insertUser(q: Queryable, u: User): Promise<void> {
+  await q.query(
+    `INSERT INTO users (id, phone, email, full_name, created_via, created_by_client_id, status, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [u.id, u.phone, u.email, u.fullName, u.createdVia, u.createdByClientId, u.status, u.createdAt],
+  );
+}
+
+/** Users, consents, clients, sessions, refresh tokens and OTP codes: the identity module's tables. */
 export class IdentityRepository {
   private readonly db: Db;
 
@@ -105,10 +137,30 @@ export class IdentityRepository {
   }
 
   async createUser(u: User): Promise<User> {
-    await this.db.query('INSERT INTO users (id, phone, email, status, created_at) VALUES ($1, $2, $3, $4, $5)', [
-      u.id, u.phone, u.email, u.status, u.createdAt,
-    ]);
+    await insertUser(this.db, u);
     return u;
+  }
+
+  /** Creates a self-registered user with their consents, all or nothing. */
+  async createSignedUpUser(u: User, consents: readonly Consent[]): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await insertUser(tx, u);
+      for (const c of consents) {
+        await tx.query('INSERT INTO user_consents (user_id, kind, version, accepted_at, ip) VALUES ($1, $2, $3, $4, $5)', [
+          u.id, c.kind, c.version, c.acceptedAt, c.ip,
+        ]);
+      }
+    });
+  }
+
+  async consents(userId: string): Promise<Consent[]> {
+    const rows = await this.db.query('SELECT * FROM user_consents WHERE user_id = $1 ORDER BY accepted_at, kind', [userId]);
+    return rows.map((r) => ({
+      kind: r['kind'] as ConsentKind,
+      version: r['version'] as string,
+      acceptedAt: r['accepted_at'] as Date,
+      ip: r['ip'] as string,
+    }));
   }
 
   async userByPhone(phone: string): Promise<User | null> {
@@ -212,13 +264,14 @@ export class IdentityRepository {
 
   async createOtp(o: OtpCode): Promise<void> {
     await this.db.query(
-      'INSERT INTO otp_codes (id, phone, ip, code_hash, created_at, expires_at, attempts) VALUES ($1, $2, $3, $4, $5, $6, 0)',
-      [o.id, o.phone, o.ip, o.codeHash, o.createdAt, o.expiresAt],
+      'INSERT INTO otp_codes (id, purpose, phone, ip, code_hash, created_at, expires_at, attempts) VALUES ($1, $2, $3, $4, $5, $6, $7, 0)',
+      [o.id, o.purpose, o.phone, o.ip, o.codeHash, o.createdAt, o.expiresAt],
     );
   }
 
-  async latestOtp(phone: string): Promise<OtpCode | null> {
-    const [row] = await this.db.query('SELECT * FROM otp_codes WHERE phone = $1 ORDER BY seq DESC LIMIT 1', [phone]);
+  /** The newest [purpose] code sent to [phone]. */
+  async latestOtp(phone: string, purpose: OtpPurpose): Promise<OtpCode | null> {
+    const [row] = await this.db.query('SELECT * FROM otp_codes WHERE phone = $1 AND purpose = $2 ORDER BY seq DESC LIMIT 1', [phone, purpose]);
     return row ? toOtp(row) : null;
   }
 

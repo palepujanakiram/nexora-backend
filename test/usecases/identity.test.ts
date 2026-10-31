@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { OtpChannel } from '../../src/brokers/msg91.ts';
 import { IdentityRepository } from '../../src/data/identity.ts';
 import { AppError } from '../../src/domain/errors.ts';
+import type { SignupForm } from '../../src/domain/profile.ts';
 import { DEFAULT_OTP_POLICY, IdentityService } from '../../src/usecases/identity.ts';
 import { TokenSigner } from '../../src/usecases/tokens.ts';
 import { JWT_PRIVATE_KEY, harness, testClock } from '../app.ts';
 import { testDb } from '../db.ts';
-import { memoryLog, defined, objectContaining } from '../helpers.ts';
+import { NOW, memoryLog, defined, objectContaining } from '../helpers.ts';
 
 const PHONE = '9876543210';
 const IP = '203.0.113.7';
@@ -291,6 +292,8 @@ describe('admin', () => {
     });
     const blank = await w.s.identity.registerUser({ phone: '9123456780', email: '   ' });
     expect(blank).toMatchObject({ phone: '919123456780', email: null, status: 'active' });
+    // Admin-created users are marked as such when read back.
+    expect(await new IdentityRepository(w.s.db).user(blank.id)).toMatchObject({ fullName: null, createdVia: 'admin', createdByClientId: null });
   });
 
   it('registers clients only with the otp grant, and lists them', async () => {
@@ -308,7 +311,9 @@ describe('OTP delivery', () => {
     const repo = new IdentityRepository(await testDb());
     const log = memoryLog();
     const signer = new TokenSigner({ privateKeyPem: JWT_PRIVATE_KEY, kid: 'k1', issuer: 'test', previous: [], clock });
-    const service = new IdentityService({ repo, signer, channels, clock, log, policy: DEFAULT_OTP_POLICY });
+    const service = new IdentityService({
+      repo, signer, channels, clock, log, policy: DEFAULT_OTP_POLICY, consentVersion: 'v1',
+    });
     await service.registerUser({ phone: PHONE });
     return { service, log };
   }
@@ -339,5 +344,109 @@ describe('OTP delivery', () => {
   it('answers 503 when no channel can reach the user', async () => {
     const { service } = await direct([channel('email', 'unreachable', [])]);
     await expect(service.requestOtp({ phone: PHONE, ip: IP })).rejects.toMatchObject({ status: 503, code: 'otp_unavailable' });
+  });
+});
+
+describe('sign-up', () => {
+  const NEW_PHONE = '9123456780';
+  const form = (overrides: Partial<SignupForm> = {}): SignupForm => ({
+    fullName: '  Ravi   Kumar ',
+    email: 'Ravi.K@Example.com',
+    consents: { terms: true, risk: true, dataUse: true },
+    ...overrides,
+  });
+  const signUp = async (w: Awaited<ReturnType<typeof world>>, phone = NEW_PHONE, details = form()) => {
+    await w.s.identity.requestSignupOtp({ ...details, phone, ip: IP });
+    return w.s.identity.verifySignup({ ...details, phone, code: defined(w.otps.at(-1)), clientId: w.client.id, device: 'Pixel 9', ip: IP });
+  };
+
+  it('texts a code to an unregistered number, then creates the user with their consents and signs them in', async () => {
+    const w = await world();
+    expect(await w.s.identity.requestSignupOtp({ ...form(), phone: NEW_PHONE, ip: IP })).toEqual({ sent: true, expiresInSeconds: 300 });
+    expect(w.otps).toHaveLength(1);
+    const r = await w.s.identity.verifySignup({ ...form(), phone: NEW_PHONE, code: defined(w.otps[0]), clientId: w.client.id, device: 'Pixel 9', ip: IP });
+    expect(r.user).toEqual({
+      id: r.user.id, phone: '919123456780', email: 'ravi.k@example.com', fullName: 'Ravi Kumar',
+      createdVia: 'client', createdByClientId: w.client.id, status: 'active', createdAt: NOW,
+    });
+    // The same users table holds them, read back like any other user.
+    const repo = new IdentityRepository(w.s.db);
+    expect(await repo.user(r.user.id)).toEqual(r.user);
+    expect((await w.s.identity.authenticate(r.accessToken)).user).toEqual(r.user);
+    // Each consent has its own row with the date and time it was accepted.
+    expect(await repo.consents(r.user.id)).toEqual([
+      { kind: 'data_use', version: 'draft', acceptedAt: NOW, ip: IP },
+      { kind: 'risk', version: 'draft', acceptedAt: NOW, ip: IP },
+      { kind: 'terms', version: 'draft', acceptedAt: NOW, ip: IP },
+    ]);
+    // From now on the number signs in like any other.
+    expect((await w.login(NEW_PHONE)).user).toEqual(r.user);
+  });
+
+  it('stamps consents with the time the account was created', async () => {
+    const w = await world();
+    w.clock.advance(90 * 60_000);
+    const r = await signUp(w);
+    const accepted = (await new IdentityRepository(w.s.db).consents(r.user.id)).map((c) => c.acceptedAt);
+    expect(accepted).toEqual([0, 1, 2].map(() => new Date(NOW.getTime() + 90 * 60_000)));
+  });
+
+  it('checks the form before sending a code', async () => {
+    const w = await world();
+    const request = async (details: SignupForm) => rejects(w.s.identity.requestSignupOtp({ ...details, phone: NEW_PHONE, ip: IP }));
+    expect(await request(form({ consents: { terms: true, risk: false, dataUse: true } }))).toMatchObject({
+      status: 400, message: 'Please confirm each of the statements to create your account.',
+    });
+    expect((await request(form({ email: 'ravi@' }))).message).toBe('Enter a valid email address.');
+    expect((await request(form({ fullName: '1' }))).message).toBe('Enter your full name.');
+    expect(w.otps).toHaveLength(0);
+  });
+
+  it('keeps sign-up and sign-in codes apart', async () => {
+    const w = await world();
+    await w.s.identity.requestSignupOtp({ ...form(), phone: PHONE, ip: IP });
+    const signupCode = defined(w.otps.at(-1));
+    const login = await rejects(w.s.identity.verifyOtp({ phone: PHONE, code: signupCode, clientId: w.client.id, device: 'x', ip: IP }));
+    expect(login).toMatchObject({ status: 401, code: 'otp_expired' });
+
+    await w.s.identity.requestOtp({ phone: PHONE, ip: IP });
+    const loginCode = defined(w.otps.at(-1));
+    // The sign-up code is still the latest sign-up code, so the sign-in code is simply wrong there.
+    const signup = await rejects(w.s.identity.verifySignup({ ...form(), phone: PHONE, code: loginCode === signupCode ? '000000' : loginCode, clientId: w.client.id, device: 'x', ip: IP }));
+    expect(signup).toMatchObject({ status: 401, code: 'otp_invalid' });
+  });
+
+  it('tells the owner of a registered number to sign in instead', async () => {
+    const w = await world();
+    const e = await rejects(signUp(w, PHONE));
+    expect(e).toMatchObject({ status: 409, code: 'already_registered', message: 'This mobile number already has an account. Sign in instead.' });
+  });
+
+  it('refuses an email that is already registered, and leaves the code usable to fix the form', async () => {
+    const w = await world();
+    await w.s.identity.requestSignupOtp({ ...form(), phone: NEW_PHONE, ip: IP });
+    const code = defined(w.otps.at(-1));
+    const verify = async (details: SignupForm) =>
+      w.s.identity.verifySignup({ ...details, phone: NEW_PHONE, code, clientId: w.client.id, device: 'x', ip: IP });
+
+    // ravi@example.com belongs to the admin-created user in world().
+    expect(await rejects(verify(form({ email: 'RAVI@example.com' })))).toMatchObject({ status: 409, message: 'An account with this email already exists.' });
+    expect((await verify(form({ email: 'second@example.com' }))).user.email).toBe('second@example.com');
+    // Signing up used the code.
+    expect(await rejects(verify(form({ email: 'third@example.com' })))).toMatchObject({ status: 401, code: 'otp_expired' });
+  });
+
+  it('shares the hourly code limit with sign-in', async () => {
+    const w = await world();
+    await w.s.identity.requestOtp({ phone: PHONE, ip: IP });
+    await w.s.identity.requestOtp({ phone: PHONE, ip: IP });
+    await w.s.identity.requestSignupOtp({ ...form(), phone: PHONE, ip: IP });
+    expect(await rejects(w.s.identity.requestSignupOtp({ ...form(), phone: PHONE, ip: IP }))).toMatchObject({ status: 429 });
+  });
+
+  it('refuses an unknown client before checking anything else', async () => {
+    const w = await world();
+    const e = await rejects(w.s.identity.verifySignup({ ...form(), phone: NEW_PHONE, code: '123456', clientId: 'cl_nope', device: 'x', ip: IP }));
+    expect(e).toMatchObject({ status: 401, message: 'Unknown client_id.' });
   });
 });

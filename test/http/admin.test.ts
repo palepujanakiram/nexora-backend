@@ -33,7 +33,7 @@ describe('users and clients', () => {
     const { app } = await testApp();
     const res = await app.inject({ method: 'POST', url: '/admin/users', headers: admin, payload: { phone: '98765 43210', email: 'a@b.in' } });
     expect(res.statusCode).toBe(201);
-    expect(res.json()).toEqual({ id: anyString(), phone: '+919876543210', email: 'a@b.in', createdAt: '2026-10-27T04:00:00.000Z' });
+    expect(res.json()).toEqual({ id: anyString(), phone: '+919876543210', email: 'a@b.in', fullName: null, createdAt: '2026-10-27T04:00:00.000Z' });
     const dup = await app.inject({ method: 'POST', url: '/admin/users', headers: admin, payload: { phone: '+919876543210' } });
     expect(dup.statusCode).toBe(409);
     expect(dup.json()).toEqual({ error: { code: 'conflict', message: 'A user with this mobile number already exists.' } });
