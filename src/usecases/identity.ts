@@ -2,9 +2,10 @@ import { randomInt } from 'node:crypto';
 
 import type { OtpChannel } from '../brokers/msg91.ts';
 import { newId, newToken, sameSecret, sha256 } from '../data/crypto.ts';
-import type { Client, ClientPlatform, GrantType, IdentityRepository, Session, User } from '../data/identity.ts';
+import type { Client, ClientPlatform, GrantType, IdentityRepository, OtpCode, OtpPurpose, Session, User } from '../data/identity.ts';
 import { AppError, badRequest, conflict, forbidden, tooManyRequests, unauthorized } from '../domain/errors.ts';
 import { normalizeIndianMobile } from '../domain/phone.ts';
+import { CONSENT_KINDS, checkSignup, normalizeEmail, type SignupForm } from '../domain/profile.ts';
 import type { Log } from '../logging.ts';
 import type { AccessClaims, TokenSigner } from './tokens.ts';
 import { must } from '../domain/invariant.ts';
@@ -30,6 +31,8 @@ export interface IdentityDeps {
   clock: () => Date;
   log: Log;
   policy: OtpPolicy;
+  /** The wording version recorded with each sign-up consent. */
+  consentVersion: string;
 }
 
 export interface TokenPair {
@@ -50,8 +53,13 @@ export interface Principal {
 
 const HOUR = 3_600_000;
 
+interface OtpAnswer {
+  sent: true;
+  expiresInSeconds: number;
+}
+
 /**
- * OTP login and sessions for every registered client. Access tokens are
+ * OTP sign-up, OTP login and sessions for every registered client. Access tokens are
  * short-lived JWTs; refresh tokens are opaque, stored hashed, bound to one
  * client and device, rotated on every use, and reusing a spent one revokes
  * the whole session.
@@ -67,67 +75,76 @@ export class IdentityService {
    * Texts a code to a registered number. Unregistered or disabled numbers get
    * the same answer and no SMS, so the endpoint can't be used to find users.
    */
-  async requestOtp(input: { phone: string; ip: string }): Promise<{ sent: true; expiresInSeconds: number }> {
+  async requestOtp(input: { phone: string; ip: string }): Promise<OtpAnswer> {
     const phone = normalizeIndianMobile(input.phone);
     const now = this.d.clock();
-    const { repo, policy } = this.d;
-    const answer = { sent: true as const, expiresInSeconds: policy.ttlMinutes * 60 };
-    const hourAgo = new Date(now.getTime() - HOUR);
-    limit(await repo.otpTimes('phone', phone, hourAgo), policy.perPhonePerHour, now, 'Too many codes for this number. Try again later.');
-    limit(await repo.otpTimes('ip', input.ip, hourAgo), policy.perIpPerHour, now, 'Too many codes from this network. Try again later.');
-
-    const user = await repo.userByPhone(phone);
-    const code = String(randomInt(0, 10 ** policy.length)).padStart(policy.length, '0');
-    const id = newId('otp');
+    await this.limitCodes(phone, input.ip, now);
+    const user = await this.d.repo.userByPhone(phone);
     // Recorded even for unknown numbers, so the limits apply to them too.
-    await repo.createOtp({
-      id, phone, ip: input.ip, codeHash: user?.status === 'active' ? sha256(`${id}:${code}`) : 'none',
-      createdAt: now, expiresAt: new Date(now.getTime() + policy.ttlMinutes * 60_000), attempts: 0, usedAt: null,
-    });
-    await repo.deleteOtpsBefore(new Date(now.getTime() - 24 * HOUR));
+    const code = await this.storeCode(phone, input.ip, 'login', now, user?.status === 'active');
     if (user?.status !== 'active') {
       this.d.log.info({ reason: 'not_registered' }, 'otp requested for unknown number');
-      return answer;
+      return this.answer();
     }
-    await this.deliver(user, code);
-    return answer;
+    await this.deliver(user, code, user.id);
+    return this.answer();
   }
 
   async verifyOtp(input: { phone: string; code: string; clientId: string; device: string; ip: string }): Promise<TokenPair & { user: User }> {
     const client = await this.client(input.clientId, 'otp');
     const phone = normalizeIndianMobile(input.phone);
-    const code = input.code.trim();
-    const { repo, policy } = this.d;
-    if (!new RegExp(`^\\d{${policy.length}}$`).test(code)) throw badRequest(`Enter the ${policy.length}-digit code.`);
     const now = this.d.clock();
-    const otp = await repo.latestOtp(phone);
-    if (!otp || otp.usedAt || otp.expiresAt <= now) throw new AppError(401, 'otp_expired', 'This code has expired. Ask for a new one.');
-    if (otp.attempts >= policy.maxAttempts) throw new AppError(429, 'otp_attempts', 'Too many wrong codes. Ask for a new one.');
-    // Counted before checking, so parallel guesses can't get past the cap.
-    const attempts = await repo.addOtpAttempt(otp.id);
-    if (!sameSecret(sha256(`${otp.id}:${code}`), otp.codeHash)) {
-      const left = policy.maxAttempts - attempts;
-      throw new AppError(401, 'otp_invalid', left > 0 ? `Wrong code. ${left} ${left === 1 ? 'try' : 'tries'} left.` : 'Wrong code. Ask for a new one.');
-    }
-    if (!(await repo.useOtp(otp.id, now))) throw new AppError(401, 'otp_expired', 'This code was already used. Ask for a new one.');
-    const user = await repo.userByPhone(phone);
+    await this.useCode(await this.checkCode(phone, input.code, 'login', now), now);
+    const user = await this.d.repo.userByPhone(phone);
     if (user?.status !== 'active') throw unauthorized('This account is not active.');
-    const session: Session = {
-      id: newId('ses'),
-      userId: user.id,
-      clientId: client.id,
-      device: input.device.slice(0, 100),
-      ip: input.ip,
-      createdAt: now,
-      lastUsedAt: now,
-      expiresAt: new Date(now.getTime() + client.refreshTtlSeconds * 1000),
-      revokedAt: null,
-      revokedReason: null,
+    const tokens = await this.startSession(user, client, input, now);
+    this.d.log.info({ userId: user.id, sessionId: tokens.sessionId, clientId: client.id, event: 'login' }, 'signed in');
+    return { ...tokens, user };
+  }
+
+  /**
+   * Checks the sign-up form, then texts a sign-up code to [phone]. The code
+   * goes out even if the number is registered: whether it is only comes out
+   * after the code proves the number belongs to the caller.
+   */
+  async requestSignupOtp(input: SignupForm & { phone: string; ip: string }): Promise<OtpAnswer> {
+    checkSignup(input);
+    const phone = normalizeIndianMobile(input.phone);
+    const now = this.d.clock();
+    await this.limitCodes(phone, input.ip, now);
+    const code = await this.storeCode(phone, input.ip, 'signup', now, true);
+    await this.deliver({ phone, email: null }, code, null);
+    return this.answer();
+  }
+
+  /**
+   * Creates the account once the sign-up code checks out, records the
+   * consents, and signs the new user in. A clash (number or email
+   * already registered) leaves the code unused, so the user can fix
+   * the form and send it again within the code's tries.
+   */
+  async verifySignup(
+    input: SignupForm & { phone: string; code: string; clientId: string; device: string; ip: string },
+  ): Promise<TokenPair & { user: User }> {
+    const client = await this.client(input.clientId, 'otp');
+    const details = checkSignup(input);
+    const phone = normalizeIndianMobile(input.phone);
+    const now = this.d.clock();
+    const { repo } = this.d;
+    const otp = await this.checkCode(phone, input.code, 'signup', now);
+    if (await repo.userByPhone(phone)) throw new AppError(409, 'already_registered', 'This mobile number already has an account. Sign in instead.');
+    if (await repo.userByEmail(details.email)) throw conflict('An account with this email already exists.');
+    await this.useCode(otp, now);
+
+    const user: User = {
+      id: newId('usr'), phone, email: details.email, fullName: details.fullName, createdVia: 'client', createdByClientId: client.id, status: 'active', createdAt: now,
     };
-    const refresh = newToken('rt');
-    await repo.createSession(session, sha256(refresh));
-    this.d.log.info({ userId: user.id, sessionId: session.id, clientId: client.id, event: 'login' }, 'signed in');
-    return { ...this.pair(session, client, refresh), user };
+    // Each consent is recorded with the date and time it was accepted: when the verified form created the account.
+    const consents = CONSENT_KINDS.map((kind) => ({ kind, version: this.d.consentVersion, acceptedAt: now, ip: input.ip }));
+    await repo.createSignedUpUser(user, consents);
+    const tokens = await this.startSession(user, client, input, now);
+    this.d.log.info({ userId: user.id, sessionId: tokens.sessionId, clientId: client.id, event: 'signup' }, 'signed up');
+    return { ...tokens, user };
   }
 
   async refresh(input: { refreshToken: string; clientId: string }): Promise<TokenPair> {
@@ -178,12 +195,12 @@ export class IdentityService {
 
   async registerUser(input: { phone: string; email?: string | null | undefined }): Promise<User> {
     const phone = normalizeIndianMobile(input.phone);
-    const typed = input.email?.trim().toLowerCase();
-    const email = typed === undefined || typed === '' ? null : typed;
-    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest('Enter a valid email address.');
+    const email = input.email?.trim() ? normalizeEmail(input.email) : null;
     if (await this.d.repo.userByPhone(phone)) throw conflict('A user with this mobile number already exists.');
     if (email && (await this.d.repo.userByEmail(email))) throw conflict('A user with this email already exists.');
-    return this.d.repo.createUser({ id: newId('usr'), phone, email, status: 'active', createdAt: this.d.clock() });
+    return this.d.repo.createUser({
+      id: newId('usr'), phone, email, fullName: null, createdVia: 'admin', createdByClientId: null, status: 'active', createdAt: this.d.clock(),
+    });
   }
 
   async registerClient(input: { name: string; platform: ClientPlatform; grantTypes: GrantType[]; accessTtlSeconds: number; refreshTtlSeconds: number }): Promise<Client> {
@@ -196,6 +213,71 @@ export class IdentityService {
   }
 
   // Internals ----------------------------------------------------------------
+
+  private answer(): OtpAnswer {
+    return { sent: true, expiresInSeconds: this.d.policy.ttlMinutes * 60 };
+  }
+
+  /** Codes per number and per client IP per hour, across sign-in and sign-up. */
+  private async limitCodes(phone: string, ip: string, now: Date): Promise<void> {
+    const { repo, policy } = this.d;
+    const hourAgo = new Date(now.getTime() - HOUR);
+    limit(await repo.otpTimes('phone', phone, hourAgo), policy.perPhonePerHour, now, 'Too many codes for this number. Try again later.');
+    limit(await repo.otpTimes('ip', ip, hourAgo), policy.perIpPerHour, now, 'Too many codes from this network. Try again later.');
+  }
+
+  /** Stores a new code and returns it. An undeliverable code is stored with no hash, so it can never be verified. */
+  private async storeCode(phone: string, ip: string, purpose: OtpPurpose, now: Date, deliverable: boolean): Promise<string> {
+    const { repo, policy } = this.d;
+    const code = String(randomInt(0, 10 ** policy.length)).padStart(policy.length, '0');
+    const id = newId('otp');
+    await repo.createOtp({
+      id, purpose, phone, ip, codeHash: deliverable ? sha256(`${id}:${code}`) : 'none',
+      createdAt: now, expiresAt: new Date(now.getTime() + policy.ttlMinutes * 60_000), attempts: 0, usedAt: null,
+    });
+    await repo.deleteOtpsBefore(new Date(now.getTime() - 24 * HOUR));
+    return code;
+  }
+
+  /** The latest [purpose] code for [phone], if [given] matches it. Counts the try; doesn't use the code up. */
+  private async checkCode(phone: string, given: string, purpose: OtpPurpose, now: Date): Promise<OtpCode> {
+    const { repo, policy } = this.d;
+    const code = given.trim();
+    if (!new RegExp(`^\\d{${policy.length}}$`).test(code)) throw badRequest(`Enter the ${policy.length}-digit code.`);
+    const otp = await repo.latestOtp(phone, purpose);
+    if (!otp || otp.usedAt || otp.expiresAt <= now) throw new AppError(401, 'otp_expired', 'This code has expired. Ask for a new one.');
+    if (otp.attempts >= policy.maxAttempts) throw new AppError(429, 'otp_attempts', 'Too many wrong codes. Ask for a new one.');
+    // Counted before checking, so parallel guesses can't get past the cap.
+    const attempts = await repo.addOtpAttempt(otp.id);
+    if (!sameSecret(sha256(`${otp.id}:${code}`), otp.codeHash)) {
+      const left = policy.maxAttempts - attempts;
+      throw new AppError(401, 'otp_invalid', left > 0 ? `Wrong code. ${left} ${left === 1 ? 'try' : 'tries'} left.` : 'Wrong code. Ask for a new one.');
+    }
+    return otp;
+  }
+
+  /** Marks the code used. Of two requests racing with the same code, only one gets past here. */
+  private async useCode(otp: OtpCode, now: Date): Promise<void> {
+    if (!(await this.d.repo.useOtp(otp.id, now))) throw new AppError(401, 'otp_expired', 'This code was already used. Ask for a new one.');
+  }
+
+  private async startSession(user: User, client: Client, from: { device: string; ip: string }, now: Date): Promise<TokenPair> {
+    const session: Session = {
+      id: newId('ses'),
+      userId: user.id,
+      clientId: client.id,
+      device: from.device.slice(0, 100),
+      ip: from.ip,
+      createdAt: now,
+      lastUsedAt: now,
+      expiresAt: new Date(now.getTime() + client.refreshTtlSeconds * 1000),
+      revokedAt: null,
+      revokedReason: null,
+    };
+    const refresh = newToken('rt');
+    await this.d.repo.createSession(session, sha256(refresh));
+    return this.pair(session, client, refresh);
+  }
 
   private pair(session: Session, client: Client, refresh: string): TokenPair {
     const { token, expiresAt } = this.d.signer.sign({ sub: session.userId, aud: client.id, sid: session.id }, client.accessTtlSeconds);
@@ -216,16 +298,16 @@ export class IdentityService {
     return client;
   }
 
-  /** Tries each channel that can reach the user until one succeeds. */
-  private async deliver(user: User, code: string): Promise<void> {
+  /** Tries each channel that can reach [to] until one succeeds. [userId] is null for someone signing up. */
+  private async deliver(to: { phone: string; email: string | null }, code: string, userId: string | null): Promise<void> {
     let last: unknown = null;
-    for (const channel of this.d.channels.filter((c) => c.canReach(user))) {
+    for (const channel of this.d.channels.filter((c) => c.canReach(to))) {
       try {
-        await channel.send(user, code, this.d.policy.ttlMinutes);
+        await channel.send(to, code, this.d.policy.ttlMinutes);
         return;
       } catch (e) {
         last = e;
-        this.d.log.warn({ userId: user.id, op: channel.name, reason: (e as Error).message }, 'otp channel failed; trying the next');
+        this.d.log.warn({ ...(userId === null ? {} : { userId }), op: channel.name, reason: (e as Error).message }, 'otp channel failed; trying the next');
       }
     }
     if (last instanceof Error) throw last;

@@ -104,5 +104,6 @@ describe('loadConfig', () => {
   it('accepts a production msg91 setup', () => {
     const c = load({ NODE_ENV: 'production', OTP_PROVIDER: 'msg91', MSG91_AUTH_KEY: 'k', MSG91_TEMPLATE_ID: 't' });
     expect(c).toMatchObject({ NODE_ENV: 'production', OTP_PROVIDER: 'msg91', MSG91_AUTH_KEY: 'k', MSG91_TEMPLATE_ID: 't' });
+    expect(load({}).CONSENT_VERSION).toBe('draft');
   });
 });

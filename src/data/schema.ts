@@ -365,4 +365,31 @@ export const MIGRATIONS: readonly string[] = [
     updated_at timestamptz NOT NULL
   );
   `,
+  `
+  -- Identity: self sign-up -------------------------------------------------
+  -- full_name is set for users who signed themselves up; null for users an admin created.
+  -- created_via says how the user was created: 'admin' (POST /admin/users or the CLI; every
+  -- user before this migration) or 'client' (self sign-up through a registered app, named by
+  -- created_by_client_id).
+  ALTER TABLE users
+    ADD COLUMN full_name text,
+    ADD COLUMN created_via text NOT NULL DEFAULT 'admin' CHECK (created_via IN ('admin', 'client')),
+    ADD COLUMN created_by_client_id text REFERENCES clients(id),
+    ADD CONSTRAINT users_created_by_client CHECK ((created_via = 'client') = (created_by_client_id IS NOT NULL));
+
+  -- Each statement the user confirmed: when, from where, and the version of the wording they saw.
+  CREATE TABLE user_consents (
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind text NOT NULL CHECK (kind IN ('terms', 'risk', 'data_use')),
+    version text NOT NULL,
+    accepted_at timestamptz NOT NULL,
+    ip text NOT NULL,
+    PRIMARY KEY (user_id, kind, version)
+  );
+
+  -- A sign-up code can't sign in, and a sign-in code can't sign up.
+  ALTER TABLE otp_codes ADD COLUMN purpose text NOT NULL DEFAULT 'login' CHECK (purpose IN ('login', 'signup'));
+  DROP INDEX otp_codes_phone;
+  CREATE INDEX otp_codes_phone ON otp_codes(phone, purpose, seq DESC);
+  `,
 ];

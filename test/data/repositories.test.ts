@@ -152,15 +152,24 @@ describe('InstrumentRepository', () => {
 describe('IdentityRepository', () => {
   it('finds users by email case-insensitively, and reports unknown ids as null', async () => {
     const r = new IdentityRepository(await testDb());
-    await r.createUser({ id: 'usr_1', phone: '919876543210', email: 'a@b.co', status: 'active', createdAt: NOW });
+    await r.createUser({ id: 'usr_1', phone: '919876543210', email: 'a@b.co', fullName: null, createdVia: 'admin', createdByClientId: null, status: 'active', createdAt: NOW });
     expect(await r.userByEmail('A@B.CO')).toMatchObject({ id: 'usr_1', email: 'a@b.co' });
     expect(await r.userByEmail('x@y.z')).toBeNull();
     expect(await r.user('usr_nope')).toBeNull();
     expect(await r.client('cl_nope')).toBeNull();
     expect(await r.session('ses_nope')).toBeNull();
     expect(await r.sessionOfRefresh('nope')).toBeNull();
-    expect(await r.latestOtp('919876543210')).toBeNull();
+    expect(await r.latestOtp('919876543210', 'login')).toBeNull();
     expect(await r.revokeSession('ses_nope', NOW, 'x')).toBe(false);
+  });
+});
+
+describe('users.created_via', () => {
+  it('requires a client for users created via a client, and none for admin-created ones', async () => {
+    const r = new IdentityRepository(await testDb());
+    const user = { id: 'usr_1', phone: '919876543210', email: null, fullName: 'Ravi', status: 'active' as const, createdAt: NOW };
+    await expect(r.createUser({ ...user, createdVia: 'client', createdByClientId: null })).rejects.toThrow(/users_created_by_client/);
+    await expect(r.createUser({ ...user, createdVia: 'admin', createdByClientId: 'cl_1' })).rejects.toThrow();
   });
 });
 
@@ -182,7 +191,7 @@ describe('BillingRepository', () => {
   it('records payment events once and lists them per subscription', async () => {
     const db = await testDb();
     const r = new BillingRepository(db);
-    await new IdentityRepository(db).createUser({ id: 'usr_1', phone: '919876543210', email: null, status: 'active', createdAt: NOW });
+    await new IdentityRepository(db).createUser({ id: 'usr_1', phone: '919876543210', email: null, fullName: null, createdVia: 'admin', createdByClientId: null, status: 'active', createdAt: NOW });
     await r.upsertPlan(plan);
     await r.createSubscription({
       id: 'sub_1', userId: 'usr_1', planCode: 'pro', status: 'created', currentPeriodEnd: null, graceUntil: null, cancelAtPeriodEnd: false,

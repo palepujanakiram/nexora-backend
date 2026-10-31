@@ -107,6 +107,7 @@ export async function createServices(config: Config, runtime: Runtime = realRunt
     clock,
     log,
     policy: { ...DEFAULT_OTP_POLICY, length: config.OTP_LENGTH, ttlMinutes: config.OTP_TTL_MINUTES },
+    consentVersion: config.CONSENT_VERSION,
   });
 
   const gateway = new BrokerGateway({

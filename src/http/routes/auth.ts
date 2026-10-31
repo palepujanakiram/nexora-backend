@@ -4,11 +4,17 @@ import type { Services } from '../../container.ts';
 import type { User } from '../../data/identity.ts';
 import { e164 } from '../../domain/phone.ts';
 import { principalOf } from '../app.ts';
-import { OtpRequestBody, OtpVerifyBody, RefreshBody, parse } from '../schemas.ts';
+import { OtpRequestBody, OtpVerifyBody, RefreshBody, SignupRequestBody, SignupVerifyBody, parse } from '../schemas.ts';
 
-export const userView = (u: User) => ({ id: u.id, phone: e164(u.phone), email: u.email, createdAt: u.createdAt.toISOString() });
+export const userView = (u: User) => ({
+  id: u.id,
+  phone: e164(u.phone),
+  email: u.email,
+  fullName: u.fullName,
+  createdAt: u.createdAt.toISOString(),
+});
 
-/** OTP sign-in, token refresh and the JWKS. Public, with a tighter rate limit against guessing. */
+/** OTP sign-up and sign-in, token refresh and the JWKS. Public, with a tighter rate limit against guessing. */
 export const publicAuthRoutes =
   ({ identity, signer, config }: Services): FastifyPluginAsync =>
   async (app) => {
@@ -21,6 +27,15 @@ export const publicAuthRoutes =
     app.post('/auth/otp/verify', { config: limit }, async (request) => {
       const { user, ...tokens } = await identity.verifyOtp({ ...parse(OtpVerifyBody, request.body), ip: request.ip });
       return { ...tokens, user: userView(user) };
+    });
+
+    app.post('/auth/signup/request', { config: limit }, async (request) => {
+      return identity.requestSignupOtp({ ...parse(SignupRequestBody, request.body), ip: request.ip });
+    });
+
+    app.post('/auth/signup/verify', { config: limit }, async (request, reply) => {
+      const { user, ...tokens } = await identity.verifySignup({ ...parse(SignupVerifyBody, request.body), ip: request.ip });
+      return reply.status(201).send({ ...tokens, user: userView(user) });
     });
 
     app.post('/auth/refresh', { config: limit }, async (request) => identity.refresh(parse(RefreshBody, request.body)));

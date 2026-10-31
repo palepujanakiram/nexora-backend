@@ -54,7 +54,7 @@ Each of these departs from, or settles a question left open by, the brief.
 | ClickHouse/Timescale | Separate Postgres analytics tables fed by a transactional outbox | It satisfies "never read the live order tables" without new infrastructure. |
 | OpenTelemetry + Loki/Tempo | `traceparent` is accepted and returned, and trace ids go in every log line. pino logs pass through a field allowlist at the logger. | There's no collector to export to yet. Adding the OTel SDK exporter is a follow-up. |
 | A separate gateway service | An in-process gateway behind a plain-data interface | There's one machine and one IP today (see above). |
-| Public signup | None. Users are created only by `POST /admin/users` or the CLI. | As the brief asks. |
+| Public signup | Self sign-up by mobile OTP with full name, email and three consents (`/auth/signup/*`). Admins can still create users. Both kinds live in `users`: `created_via` is `admin` or `client` (with `created_by_client_id`, the app they signed up through), and `full_name` is null for admin-created users. | Changed at the product owner's request. |
 | v1 for one operator or external users? | Undecided. Built for multiple users, with `BILLING_ENABLED=false` meaning everyone is entitled. | It works for either answer. Settle compliance first (below). |
 
 Choices the brief didn't specify:

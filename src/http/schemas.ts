@@ -25,6 +25,14 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'use YYYY-MM-DD');
 
 export const OtpRequestBody = z.object({ phone });
 export const OtpVerifyBody = z.object({ phone, code: z.string().max(10), clientId: id, device });
+const signupForm = {
+  phone,
+  fullName: z.string().max(200),
+  email: z.string().max(200),
+  consents: z.object({ terms: z.boolean(), risk: z.boolean(), dataUse: z.boolean() }),
+};
+export const SignupRequestBody = z.object(signupForm);
+export const SignupVerifyBody = z.object({ ...signupForm, code: z.string().max(10), clientId: id, device });
 export const RefreshBody = z.object({ refreshToken: z.string().min(1).max(200), clientId: id });
 
 export const RegisterUserBody = z.object({ phone, email: z.string().max(200).nullable().optional() });

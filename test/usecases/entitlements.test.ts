@@ -85,7 +85,7 @@ async function service(billingEnabled = true) {
   const db = await testDb();
   const billing = new BillingRepository(db);
   const clock = testClock();
-  await new IdentityRepository(db).createUser({ id: 'usr_1', phone: '919876543210', email: null, status: 'active', createdAt: NOW });
+  await new IdentityRepository(db).createUser({ id: 'usr_1', phone: '919876543210', email: null, fullName: null, createdVia: 'admin', createdByClientId: null, status: 'active', createdAt: NOW });
   const entitlements = new EntitlementService({ billing, clock, billingEnabled, graceDays: 3, cacheMs: 30_000, unlimited: UNLIMITED, upgradeUrl: 'https://nexora.test/plans' });
   const subscribe = async (over: Partial<Subscription> = {}) => {
     const sub: Subscription = {
