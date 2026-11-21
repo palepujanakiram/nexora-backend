@@ -54,6 +54,9 @@ const ConfigSchema = z
     /** Bearer token for /admin endpoints. Unset turns them off. */
     ADMIN_TOKEN: optionalText,
 
+    /** The vendor's x-api-key for Nexora's EMA Pivot signals API. Unset turns GET /signals/feed off (503). */
+    EPS_API_KEY: optionalText,
+
     /** `msg91` texts codes; `console` prints them (development only). */
     OTP_PROVIDER: z.enum(['msg91', 'console']).default('console'),
     MSG91_AUTH_KEY: optionalText,

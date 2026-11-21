@@ -102,6 +102,11 @@ export const InstrumentQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(100),
 });
 export const ParseSignalBody = z.object({ text: z.string().max(2000) });
+export const SignalsFeedQuery = z.object({
+  symbols: z.string().max(100).default('NIFTY,SENSEX'),
+  tfs: z.string().max(100).default('15m,30m,1H'),
+  history: z.coerce.number().int().min(0).max(50).default(5),
+});
 export const CheckoutBody = z.object({ planCode: z.string().min(1).max(40) });
 export const AnalyticsQuery = z.object({
   from: isoDate.optional(),

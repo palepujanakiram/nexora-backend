@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import { InstrumentRepository } from '../../src/data/instruments.ts';
+import { EPS_API_URL } from '../../src/http/routes/market.ts';
 import { signIn, testApp } from '../app.ts';
-import { NOW, anyString, defined, type ErrorBody } from '../helpers.ts';
+import { NOW, anyString, defined, fakeFetch, json, text, type ErrorBody } from '../helpers.ts';
 
 interface Instruments {
   instruments: unknown[];
@@ -81,6 +82,61 @@ describe('POST /signals/parse', () => {
     expect(res.statusCode).toBe(422);
     expect(res.json<ErrorBody>().error.code).toBe('invalid_signal');
     expect((await t.app.inject({ method: 'POST', url: '/signals/parse', headers: me.headers, payload: {} })).statusCode).toBe(400);
+  });
+});
+
+describe('GET /signals/feed', () => {
+  it('forwards symbols/tfs/history with the vendor key server-side, and returns the body as-is', async () => {
+    const fetch = fakeFetch((url) =>
+      url === `${EPS_API_URL}?symbols=NIFTY&tfs=30m&history=10` ? json({ symbols: [{ symbol: 'NIFTY' }] }) : text('no', 500),
+    );
+    const t = await testApp({ fetch, env: { EPS_API_KEY: 'vendor-secret' } });
+    const me = await signIn(t);
+    const res = await t.app.inject({ method: 'GET', url: '/signals/feed?symbols=NIFTY&tfs=30m&history=10', headers: me.headers });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ symbols: [{ symbol: 'NIFTY' }] });
+    expect(defined(fetch.calls[0]).headers['x-api-key']).toBe('vendor-secret');
+  });
+
+  it('defaults to both symbols, the measured-good timeframes and a history of 5', async () => {
+    const fetch = fakeFetch((url) =>
+      url === `${EPS_API_URL}?symbols=NIFTY%2CSENSEX&tfs=15m%2C30m%2C1H&history=5` ? json({ symbols: [] }) : text('no', 500),
+    );
+    const t = await testApp({ fetch, env: { EPS_API_KEY: 'vendor-secret' } });
+    const me = await signIn(t);
+    const res = await t.app.inject({ method: 'GET', url: '/signals/feed', headers: me.headers });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('answers 503 eps_not_configured when EPS_API_KEY is unset', async () => {
+    const t = await testApp();
+    const me = await signIn(t);
+    const res = await t.app.inject({ method: 'GET', url: '/signals/feed', headers: me.headers });
+    expect(res.statusCode).toBe(503);
+    expect(res.json<ErrorBody>().error.code).toBe('eps_not_configured');
+  });
+
+  it('answers 502 eps_unavailable when the vendor is unreachable, errors, or returns junk', async () => {
+    let answer: () => Response = () => {
+      throw new Error('offline');
+    };
+    const t = await testApp({ fetch: fakeFetch(() => answer()), env: { EPS_API_KEY: 'vendor-secret' } });
+    const me = await signIn(t);
+    const unreachable = await t.app.inject({ method: 'GET', url: '/signals/feed', headers: me.headers });
+    expect(unreachable.statusCode).toBe(502);
+    expect(unreachable.json<ErrorBody>().error.code).toBe('eps_unavailable');
+
+    answer = () => text('bad key', 401);
+    expect((await t.app.inject({ method: 'GET', url: '/signals/feed', headers: me.headers })).statusCode).toBe(502);
+
+    answer = () => text('not json', 200);
+    expect((await t.app.inject({ method: 'GET', url: '/signals/feed', headers: me.headers })).statusCode).toBe(502);
+  });
+
+  it('requires sign-in', async () => {
+    const t = await testApp({ env: { EPS_API_KEY: 'vendor-secret' } });
+    const res = await t.app.inject({ method: 'GET', url: '/signals/feed' });
+    expect(res.statusCode).toBe(401);
   });
 });
 
