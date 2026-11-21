@@ -17,6 +17,10 @@ primary_region = "sin"
   LIVE_TRADING = "false"
   BILLING_ENABLED = "false"
   OTP_PROVIDER = "msg91"
+  # Without this, CORS is off and every browser-based client (the Flutter web
+  # build) is refused — see docs/deploy-fly.md. Add your deployed web app's
+  # origin here too, comma-separated, once you have one.
+  CORS_ORIGINS = "http://localhost:5050"
 
 # The volume from the SQLite version (1.x) stays mounted at /data. The server no
 # longer uses it (data lives in Postgres), but Fly refuses to deploy while a
