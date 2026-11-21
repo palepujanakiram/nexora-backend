@@ -6,9 +6,12 @@ import { exchangeOf } from '../../domain/signal.ts';
 import { toPaise } from '../../domain/money.ts';
 import { instrumentId } from '../../domain/instrument.ts';
 import { principalOf } from '../app.ts';
-import { AnalyticsQuery, InstrumentQuery, ParseSignalBody, parse } from '../schemas.ts';
+import { AnalyticsQuery, InstrumentQuery, ParseSignalBody, SignalsFeedQuery, parse } from '../schemas.ts';
 
 export const EGRESS_IP_URL = 'https://api.ipify.org?format=json';
+
+/** Nexora's own EMA Pivot signals API (vendor-hosted; never called from app or browser code). */
+export const EPS_API_URL = 'https://zxrzvywkyhyssajdkdpy.supabase.co/functions/v1/eps-api';
 
 /** Instruments, positions, signals, analytics and server facts. */
 export const marketRoutes =
@@ -38,6 +41,37 @@ export const marketRoutes =
         order: { side: signal.action, orderType: 'LIMIT', price: String(signal.entryHigh) },
         warnings: known ? signal.warnings : [...signal.warnings, `Instrument ${id} isn't in the instrument master yet.`],
       };
+    });
+
+    /**
+     * Live NIFTY/SENSEX signals from Nexora's EMA Pivot rule, proxied so the
+     * vendor's x-api-key stays server-side only — the app never holds it.
+     * Measured-good defaults (both symbols, 15m/30m/1H, no option premium
+     * signals): the vendor's own testing shows 3m/5m and option premium
+     * signals lose money.
+     */
+    app.get('/signals/feed', async (request) => {
+      const q = parse(SignalsFeedQuery, request.query);
+      const key = s.config.EPS_API_KEY;
+      if (!key) throw new AppError(503, 'eps_not_configured', 'The signals feed is not configured on this server.');
+      const target = new URL(EPS_API_URL);
+      target.searchParams.set('symbols', q.symbols);
+      target.searchParams.set('tfs', q.tfs);
+      target.searchParams.set('history', String(q.history));
+      let upstream: Response;
+      try {
+        upstream = await s.fetch(target.toString(), { headers: { 'x-api-key': key } });
+      } catch {
+        throw new AppError(502, 'eps_unavailable', "Couldn't reach the signals service. Try again.");
+      }
+      if (!upstream.ok) throw new AppError(502, 'eps_unavailable', 'The signals service is unavailable. Try again.');
+      let body: unknown;
+      try {
+        body = await upstream.json();
+      } catch {
+        throw new AppError(502, 'eps_unavailable', 'The signals service returned an unexpected response.');
+      }
+      return body;
     });
 
     app.get('/analytics/execution', async (request) => s.analytics.execution(principalOf(request).user.id, parse(AnalyticsQuery, request.query)));
